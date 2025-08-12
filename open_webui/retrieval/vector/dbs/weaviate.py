@@ -228,8 +228,30 @@ class WeaviateClient(VectorDBBase):
             return SearchResult(ids=[ids], documents=[texts], metadatas=[metas], distances=[[]])
 
     def query(self, collection_name: str, filter: Dict, limit: Optional[int] = None) -> Optional[GetResult]:
-        # For Weaviate, filtering by metadata requires where filters; minimal stub returns entire collection
-        return self.get(collection_name)
+        # 简化实现：取回集合后在本地基于 metadata 做过滤
+        all_items = self.get(collection_name)
+        if not all_items or not all_items.metadatas:
+            return all_items
+        metadatas = all_items.metadatas[0]
+        documents = all_items.documents[0]
+        # v4 fetch_objects 不返回 id，已在 get() 中尝试填充 ids
+        ids = (all_items.ids[0] if all_items.ids else [None] * len(metadatas))
+        def match(md):
+            if not isinstance(md, dict):
+                return False
+            for k, v in filter.items():
+                if md.get(k) != v:
+                    return False
+            return True
+        filtered = [(i, md, doc, _id) for i, (md, doc, _id) in enumerate(zip(metadatas, documents, ids)) if match(md)]
+        if limit is not None:
+            filtered = filtered[:limit]
+        if not filtered:
+            return GetResult(ids=[[]], documents=[[]], metadatas=[[]])
+        f_ids = [it[3] for it in filtered]
+        f_docs = [it[2] for it in filtered]
+        f_mds = [it[1] for it in filtered]
+        return GetResult(ids=[f_ids], documents=[f_docs], metadatas=[f_mds])
 
     def get(self, collection_name: str) -> Optional[GetResult]:
         client = self._require_client()
@@ -272,20 +294,39 @@ class WeaviateClient(VectorDBBase):
         name = self._collection_name(collection_name)
 
         if hasattr(client, "collections"):
+            # v4: 无直接精确 where 模式，退化为 get + 逐个删除
             coll = client.collections.get(name)
+            to_delete = []
             if ids:
-                coll.data.delete_many(where={"operator": "Or", "operands": [
-                    {"path": ["id"], "operator": "Equal", "valueText": i} for i in ids
-                ]})
+                to_delete = ids
+            elif filter:
+                qr = self.query(collection_name, filter)
+                to_delete = (qr.ids[0] if qr and qr.ids else [])
             else:
-                # delete all
-                coll.data.delete_many(where={"operator": "IsNull", "path": ["id"]})
+                # 全量删除：直接删除集合
+                try:
+                    client.collections.delete(name)
+                except Exception:
+                    pass
+                return
+            for i in to_delete:
+                try:
+                    coll.data.delete_by_id(i)
+                except Exception:
+                    pass
         else:
-            if ids:
-                for i in ids:
-                    client.data_object.delete(uuid=i, class_name=name)
+            if ids or filter:
+                to_delete = ids or []
+                if filter and not to_delete:
+                    qr = self.query(collection_name, filter)
+                    to_delete = (qr.ids[0] if qr and qr.ids else [])
+                for i in to_delete:
+                    try:
+                        client.data_object.delete(uuid=i, class_name=name)
+                    except Exception:
+                        pass
             else:
-                # v3: no bulk delete; best-effort: drop collection
+                # v3: 全量删除 => 重建类
                 try:
                     client.schema.delete_class(name)
                 except Exception:

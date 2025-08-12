@@ -147,6 +147,88 @@ class CasesTable:
                 edges=[CaseEdgeModel.model_validate(e) for e in edges],
             )
 
+    def update_case(self, case_id: str, fields: dict) -> Optional[CaseModel]:
+        with get_db() as db:
+            c = db.query(Case).filter_by(id=case_id).first()
+            if not c:
+                return None
+            for k, v in fields.items():
+                if hasattr(c, k) and v is not None:
+                    setattr(c, k, v)
+            c.updated_at = int(time.time())
+            db.commit()
+            db.refresh(c)
+            return CaseModel.model_validate(c)
+
+    def create_node(
+        self,
+        case_id: str,
+        title: str,
+        content: str,
+        node_type: str,
+        status: Optional[str] = None,
+        metadata: Optional[dict] = None,
+    ) -> CaseNodeModel:
+        now = int(time.time())
+        n = CaseNode(
+            id=str(uuid.uuid4()),
+            case_id=case_id,
+            title=title,
+            content=content,
+            node_type=node_type,
+            status=status,
+            metadata=metadata or {},
+            created_at=now,
+        )
+        with get_db() as db:
+            db.add(n)
+            db.commit()
+            db.refresh(n)
+            # update case updated_at
+            db.query(Case).filter_by(id=case_id).update({"updated_at": now})
+            db.commit()
+            return CaseNodeModel.model_validate(n)
+
+    def create_edge(
+        self,
+        case_id: str,
+        source_node_id: str,
+        target_node_id: str,
+        edge_type: str,
+        metadata: Optional[dict] = None,
+    ) -> CaseEdgeModel:
+        e = CaseEdge(
+            id=str(uuid.uuid4()),
+            case_id=case_id,
+            source_node_id=source_node_id,
+            target_node_id=target_node_id,
+            edge_type=edge_type,
+            metadata=metadata or {},
+        )
+        with get_db() as db:
+            db.add(e)
+            db.commit()
+            db.refresh(e)
+            return CaseEdgeModel.model_validate(e)
+
+    def delete_node(self, node_id: str) -> bool:
+        with get_db() as db:
+            n = db.query(CaseNode).filter_by(id=node_id).first()
+            if not n:
+                return False
+            db.delete(n)
+            db.commit()
+            return True
+
+    def delete_edge(self, edge_id: str) -> bool:
+        with get_db() as db:
+            e = db.query(CaseEdge).filter_by(id=edge_id).first()
+            if not e:
+                return False
+            db.delete(e)
+            db.commit()
+            return True
+
     def list_cases_by_user(
         self,
         user_id: str,
@@ -178,4 +260,3 @@ class CasesTable:
                 page=page,
                 page_size=page_size,
             )
-

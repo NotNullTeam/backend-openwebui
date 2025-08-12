@@ -2046,6 +2046,10 @@ log.info(f"VECTOR_DB: {VECTOR_DB}")
 S3_VECTOR_BUCKET_NAME = os.environ.get("S3_VECTOR_BUCKET_NAME", None)
 S3_VECTOR_REGION = os.environ.get("S3_VECTOR_REGION", None)
 
+# Weaviate (optional)
+WEAVIATE_URL = os.environ.get("WEAVIATE_URL", "http://localhost:8080")
+WEAVIATE_COLLECTION_PREFIX = os.environ.get("WEAVIATE_COLLECTION_PREFIX", "open_webui")
+
 ####################################
 # Information Retrieval (RAG)
 ####################################

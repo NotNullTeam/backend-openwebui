@@ -86,6 +86,8 @@ from open_webui.routers import (
     users,
     utils,
     scim,
+    analysis_migrated,
+    cases_migrated,
 )
 
 from open_webui.routers.retrieval import (
@@ -1234,6 +1236,10 @@ app.include_router(
     evaluations.router, prefix="/api/v1/evaluations", tags=["evaluations"]
 )
 app.include_router(utils.router, prefix="/api/v1/utils", tags=["utils"])
+
+# Migrated endpoints (initial skeleton)
+app.include_router(analysis_migrated.router, prefix="/api/v1/analysis", tags=["analysis"])
+app.include_router(cases_migrated.router, prefix="/api/v1/cases", tags=["cases"])
 
 # SCIM 2.0 API for identity management
 if SCIM_ENABLED:

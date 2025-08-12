@@ -2208,6 +2208,28 @@ DOCLING_OCR_LANG = PersistentConfig(
     os.getenv("DOCLING_OCR_LANG", "eng,fra,deu,spa"),
 )
 
+# Alibaba IDP (DocMind) options
+ALIBABA_IDP_ENABLE_LLM = PersistentConfig(
+    "ALIBABA_IDP_ENABLE_LLM",
+    "rag.alibaba_idp_enable_llm",
+    os.getenv("ALIBABA_IDP_ENABLE_LLM", "true").lower() == "true",
+)
+ALIBABA_IDP_ENABLE_FORMULA = PersistentConfig(
+    "ALIBABA_IDP_ENABLE_FORMULA",
+    "rag.alibaba_idp_enable_formula",
+    os.getenv("ALIBABA_IDP_ENABLE_FORMULA", "true").lower() == "true",
+)
+ALIBABA_IDP_MAX_CHUNK_SIZE = PersistentConfig(
+    "ALIBABA_IDP_MAX_CHUNK_SIZE",
+    "rag.alibaba_idp_max_chunk_size",
+    int(os.getenv("ALIBABA_IDP_MAX_CHUNK_SIZE", "1000")),
+)
+ALIBABA_IDP_CHUNK_OVERLAP = PersistentConfig(
+    "ALIBABA_IDP_CHUNK_OVERLAP",
+    "rag.alibaba_idp_chunk_overlap",
+    int(os.getenv("ALIBABA_IDP_CHUNK_OVERLAP", "100")),
+)
+
 DOCLING_DO_PICTURE_DESCRIPTION = PersistentConfig(
     "DOCLING_DO_PICTURE_DESCRIPTION",
     "rag.docling_do_picture_description",

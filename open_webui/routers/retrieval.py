@@ -1434,6 +1434,11 @@ def process_file(
                     DOCUMENT_INTELLIGENCE_ENDPOINT=request.app.state.config.DOCUMENT_INTELLIGENCE_ENDPOINT,
                     DOCUMENT_INTELLIGENCE_KEY=request.app.state.config.DOCUMENT_INTELLIGENCE_KEY,
                     MISTRAL_OCR_API_KEY=request.app.state.config.MISTRAL_OCR_API_KEY,
+                    # Alibaba IDP
+                    ALIBABA_IDP_ENABLE_LLM=request.app.state.config.ALIBABA_IDP_ENABLE_LLM,
+                    ALIBABA_IDP_ENABLE_FORMULA=request.app.state.config.ALIBABA_IDP_ENABLE_FORMULA,
+                    ALIBABA_IDP_MAX_CHUNK_SIZE=request.app.state.config.ALIBABA_IDP_MAX_CHUNK_SIZE,
+                    ALIBABA_IDP_CHUNK_OVERLAP=request.app.state.config.ALIBABA_IDP_CHUNK_OVERLAP,
                 )
                 docs = loader.load(
                     file.filename, file.meta.get("content_type"), file_path

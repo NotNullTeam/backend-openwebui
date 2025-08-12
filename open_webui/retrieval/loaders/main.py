@@ -305,6 +305,35 @@ class Loader:
                     "DATALAB_MARKER_OUTPUT_FORMAT", "markdown"
                 ),
             )
+        elif (
+            self.engine == "alibaba_idp"
+            and file_ext
+            in [
+                "pdf",
+                "xls",
+                "xlsx",
+                "ods",
+                "doc",
+                "docx",
+                "odt",
+                "ppt",
+                "pptx",
+                "odp",
+                "html",
+                "epub",
+                "png",
+                "jpeg",
+                "jpg",
+                "webp",
+                "gif",
+                "tiff",
+            ]
+        ):
+            loader = AlibabaIDPLoader(
+                file_path=file_path,
+                mime_type=file_content_type,
+                **self.kwargs,
+            )
         elif self.engine == "docling" and self.kwargs.get("DOCLING_SERVER_URL"):
             if self._is_text_file(file_ext, file_content_type):
                 loader = TextLoader(file_path, autodetect_encoding=True)

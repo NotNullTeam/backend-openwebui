@@ -2,7 +2,7 @@ import time
 import uuid
 from typing import Optional, List
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Column, String, Text, BigInteger, JSON
 
 from open_webui.internal.db import Base, get_db
@@ -34,7 +34,7 @@ class CaseNode(Base):
     content = Column(Text)
     node_type = Column(Text)
     status = Column(Text, nullable=True)
-    metadata = Column(JSON, nullable=True)
+    metadata_ = Column("metadata", JSON, nullable=True)
 
     created_at = Column(BigInteger)
 
@@ -48,7 +48,7 @@ class CaseEdge(Base):
     source_node_id = Column(Text)
     target_node_id = Column(Text)
     edge_type = Column(Text)
-    metadata = Column(JSON, nullable=True)
+    metadata_ = Column("metadata", JSON, nullable=True)
 
 
 class CaseModel(BaseModel):
@@ -81,7 +81,7 @@ class CaseNodeModel(BaseModel):
     content: str
     node_type: str
     status: Optional[str] = None
-    metadata: Optional[dict] = None
+    metadata: Optional[dict] = Field(default=None, validation_alias="metadata_")
     created_at: Optional[int] = None
 
 
@@ -93,7 +93,7 @@ class CaseEdgeModel(BaseModel):
     source_node_id: str
     target_node_id: str
     edge_type: str
-    metadata: Optional[dict] = None
+    metadata: Optional[dict] = Field(default=None, validation_alias="metadata_")
 
 
 class CaseWithGraphModel(CaseModel):
@@ -177,7 +177,7 @@ class CasesTable:
             content=content,
             node_type=node_type,
             status=status,
-            metadata=metadata or {},
+            metadata_=metadata or {},
             created_at=now,
         )
         with get_db() as db:
@@ -203,7 +203,7 @@ class CasesTable:
             source_node_id=source_node_id,
             target_node_id=target_node_id,
             edge_type=edge_type,
-            metadata=metadata or {},
+            metadata_=metadata or {},
         )
         with get_db() as db:
             db.add(e)

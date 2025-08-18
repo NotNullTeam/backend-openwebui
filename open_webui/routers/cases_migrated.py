@@ -1,5 +1,7 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status
+import json
+import time
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 
@@ -13,6 +15,19 @@ from open_webui.models.cases import (
     CaseWithGraphModel,
 )
 from open_webui.models.feedbacks import Feedbacks, FeedbackForm
+from open_webui.models.knowledge import Knowledges
+from open_webui.retrieval.utils import get_embedding_function
+from open_webui.routers.retrieval import get_ef
+from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
+from open_webui.config import (
+    RAG_EMBEDDING_ENGINE,
+    RAG_EMBEDDING_MODEL,
+    RAG_EMBEDDING_BATCH_SIZE,
+    RAG_OPENAI_API_BASE_URL,
+    RAG_OPENAI_API_KEY,
+    RAG_AZURE_OPENAI_BASE_URL,
+    VECTOR_DB,
+)
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MAIN"])
@@ -341,8 +356,204 @@ async def get_case_feedback(case_id: str, user=Depends(get_verified_user)):
 # ---------- helpers ----------
 def json_dumps_safe(data: Any) -> str:
     try:
-        import json
-
         return json.dumps(data, ensure_ascii=False)
     except Exception:
         return str(data)
+
+
+# --- 节点/边列表 + 节点详情 ---
+
+
+@router.get("/{case_id}/nodes")
+async def list_case_nodes(case_id: str, user=Depends(get_verified_user)):
+    c = cases_table.get_case_with_graph_by_id(case_id)
+    if not c or c.user_id != user.id:
+        raise HTTPException(status_code=404, detail="case not found")
+    # 排序按 created_at 升序
+    nodes = sorted(c.nodes, key=lambda n: n.created_at or 0)
+    return {"nodes": [n.model_dump() for n in nodes]}
+
+
+@router.get("/{case_id}/edges")
+async def list_case_edges(case_id: str, user=Depends(get_verified_user)):
+    c = cases_table.get_case_with_graph_by_id(case_id)
+    if not c or c.user_id != user.id:
+        raise HTTPException(status_code=404, detail="case not found")
+    return {"edges": [e.model_dump() for e in c.edges]}
+
+
+@router.get("/{case_id}/nodes/{node_id}")
+async def get_node_detail(case_id: str, node_id: str, user=Depends(get_verified_user)):
+    c = cases_table.get_case_with_graph_by_id(case_id)
+    if not c or c.user_id != user.id:
+        raise HTTPException(status_code=404, detail="case not found")
+    node = next((n for n in c.nodes if n.id == node_id), None)
+    if not node:
+        raise HTTPException(status_code=404, detail="node not found")
+    return node
+
+
+# --- 节点知识溯源 ---
+
+
+@router.get("/{case_id}/nodes/{node_id}/knowledge")
+async def get_node_knowledge(
+    request: Request,
+    case_id: str,
+    node_id: str,
+    topK: int = 5,
+    vendor: Optional[str] = None,
+    retrievalWeight: float = 0.7,
+    user=Depends(get_verified_user),
+):
+    if topK < 1 or topK > 20:
+        raise HTTPException(status_code=400, detail="topK must be between 1 and 20")
+    if retrievalWeight < 0 or retrievalWeight > 1:
+        raise HTTPException(status_code=400, detail="retrievalWeight must be in [0,1]")
+
+    c = cases_table.get_case_with_graph_by_id(case_id)
+    if not c or c.user_id != user.id:
+        raise HTTPException(status_code=404, detail="case not found")
+    node = next((n for n in c.nodes if n.id == node_id), None)
+    if not node:
+        raise HTTPException(status_code=404, detail="node not found")
+
+    # 构建查询文本
+    query_text = None
+    raw = node.content or ""
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            query_text = obj.get("text") or obj.get("analysis") or obj.get("answer")
+    except Exception:
+        pass
+    if not query_text:
+        query_text = raw or node.title
+    if not query_text or not str(query_text).strip():
+        return {
+            "nodeId": node_id,
+            "sources": [],
+            "retrievalMetadata": {
+                "totalCandidates": 0,
+                "retrievalTime": 0,
+                "rerankTime": 0,
+                "strategy": "empty_query",
+            },
+        }
+
+    # 检索可访问的知识库
+    kbs = Knowledges.get_knowledge_bases_by_user_id(user.id, "read")
+
+    ef = get_ef(
+        engine=RAG_EMBEDDING_ENGINE.value,
+        embedding_model=RAG_EMBEDDING_MODEL.value,
+        auto_update=False,
+    )
+    embedding_function = get_embedding_function(
+        embedding_engine=RAG_EMBEDDING_ENGINE.value,
+        embedding_model=RAG_EMBEDDING_MODEL.value,
+        embedding_function=ef,
+        url=(RAG_AZURE_OPENAI_BASE_URL.value or RAG_OPENAI_API_BASE_URL.value),
+        key=RAG_OPENAI_API_KEY.value,
+        embedding_batch_size=RAG_EMBEDDING_BATCH_SIZE.value,
+        azure_api_version=None,
+    )
+
+    start = time.time()
+    qvec = embedding_function(query_text, prefix=None)
+    agg: List[Dict[str, Any]] = []
+    for kb in kbs:
+        try:
+            res = VECTOR_DB_CLIENT.search(collection_name=kb.id, vectors=[qvec], limit=topK)
+            if not res or not res.ids:
+                continue
+            for i, _id in enumerate(res.ids[0]):
+                item = {
+                    "knowledge_id": kb.id,
+                    "distance": float(res.distances[0][i]) if res.distances else None,
+                    "content": res.documents[0][i] if res.documents else "",
+                    "metadata": res.metadatas[0][i] if res.metadatas else {},
+                }
+                agg.append(item)
+        except Exception as e:
+            log.debug(f"knowledge search failed for {kb.id}: {e}")
+            continue
+
+    # 归一化评分并可选按 vendor 过滤
+    for it in agg:
+        d = it.get("distance")
+        if d is None:
+            it["score"] = 0.0
+        else:
+            if str(VECTOR_DB).lower() == "weaviate":
+                it["score"] = 1.0 / (1.0 + float(d))
+            else:
+                it["score"] = float(d)
+    if vendor:
+        agg = [x for x in agg if isinstance(x.get("metadata"), dict) and (x["metadata"].get("vendor") == vendor)]
+
+    agg_sorted = sorted(agg, key=lambda x: x.get("score", 0), reverse=True)[:topK]
+    for it in agg_sorted:
+        it.pop("distance", None)
+
+    elapsed_ms = int((time.time() - start) * 1000)
+    return {
+        "nodeId": node_id,
+        "sources": agg_sorted,
+        "retrievalMetadata": {
+            "totalCandidates": len(agg_sorted),
+            "retrievalTime": elapsed_ms,
+            "rerankTime": 0,
+            "strategy": "vector_search",
+        },
+    }
+
+
+# --- 画布布局 保存/获取 ---
+
+
+class CanvasLayoutForm(BaseModel):
+    nodePositions: List[Dict[str, Any]]
+    viewportState: Optional[Dict[str, Any]] = None
+
+
+@router.put("/{case_id}/layout")
+async def save_canvas_layout(case_id: str, body: CanvasLayoutForm, user=Depends(get_verified_user)):
+    # 验证案例归属
+    c = cases_table.get_case_by_id(case_id)
+    if not c or c.user_id != user.id:
+        raise HTTPException(status_code=404, detail="case not found")
+
+    from open_webui.internal.db import get_db
+    from open_webui.models.cases import Case as CaseRow
+    with get_db() as db:
+        row = db.query(CaseRow).filter_by(id=case_id).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="case not found")
+        md = row.metadata_ or {}
+        md["layout"] = {
+            "nodePositions": body.nodePositions,
+            "viewportState": body.viewportState or {},
+            "lastSaved": int(time.time()),
+        }
+        row.metadata_ = md
+        row.updated_at = int(time.time())
+        db.commit()
+    return {"ok": True}
+
+
+@router.get("/{case_id}/layout")
+async def get_canvas_layout(case_id: str, user=Depends(get_verified_user)):
+    c = cases_table.get_case_by_id(case_id)
+    if not c or c.user_id != user.id:
+        raise HTTPException(status_code=404, detail="case not found")
+    layout = (c.metadata or {}).get("layout") if c.metadata else None
+    if not layout:
+        return {
+            "nodePositions": [],
+            "viewportState": {"zoom": 1.0, "centerX": 0, "centerY": 0},
+        }
+    return {
+        "nodePositions": layout.get("nodePositions", []),
+        "viewportState": layout.get("viewportState", {"zoom": 1.0, "centerX": 0, "centerY": 0}),
+    }

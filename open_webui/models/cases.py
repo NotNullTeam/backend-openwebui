@@ -19,6 +19,7 @@ class Case(Base):
     status = Column(Text)  # open | solved | closed
     vendor = Column(Text, nullable=True)
     category = Column(Text, nullable=True)
+    metadata_ = Column("metadata", JSON, nullable=True)
 
     created_at = Column(BigInteger)
     updated_at = Column(BigInteger)
@@ -61,6 +62,7 @@ class CaseModel(BaseModel):
     status: str
     vendor: Optional[str] = None
     category: Optional[str] = None
+    metadata: Optional[dict] = Field(default=None, validation_alias="metadata_")
     created_at: Optional[int] = None
     updated_at: Optional[int] = None
 

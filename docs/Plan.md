@@ -19,10 +19,24 @@
   - 依赖：`requirements.txt` 已加入 `alibabacloud_*` 组件。
 - 基线能力共用：已复用 Open WebUI 现成的 `auths/users/files/knowledge/retrieval/...` 路由与配置体系，迁移工作围绕新增能力扩展而非重写基座。
 
+### 进度更新（2025.8.19）
+- 案例（Cases）接口补全：
+  - 新增：`DELETE /api/v1/cases/{id}`（连带删除节点/边）
+  - 新增：`POST /api/v1/cases/{case_id}/nodes/{node_id}/rate`（节点评价，写入节点 metadata）
+  - 新增：`POST /api/v1/cases/{case_id}/interactions`（生成用户补充信息与AI处理节点，并建边）
+  - 新增：`PUT /api/v1/cases/{case_id}/feedback`、`GET /api/v1/cases/{case_id}/feedback`（复用通用反馈表）
+  - 新增：`GET /api/v1/cases/{case_id}/nodes`、`GET /api/v1/cases/{case_id}/edges`、`GET /api/v1/cases/{case_id}/nodes/{node_id}`（节点/边列表与节点详情）
+  - 新增：`GET /api/v1/cases/{case_id}/nodes/{node_id}/knowledge`（节点知识溯源，向量检索+分数归一）
+  - 新增：`PUT /api/v1/cases/{case_id}/layout`、`GET /api/v1/cases/{case_id}/layout`（画布布局保存/读取，落盘于 Case.metadata）
+- 数据结构：
+  - `Case` 增加 `metadata` JSON 字段（Alembic 迁移：`b1c2d3e4f5a6_add_case_metadata.py`）
+- 分析（Analysis）：
+  - 统一相似度分值：针对 Weaviate 距离做归一，与其他后端统一输出 `score` 并按降序排序。
+
 ## 二、差距与风险（未完成/需完善）
 - 案例（Cases）能力缺口：
-  - 交互流与反馈：尚缺 `interaction` 交互链路、节点评分与案例反馈接口（原 `backend/app/api_restx/cases.py` 中的 `interaction`、`rate_node`、`feedback` 相关）。
-  - 附件与统计：创建案例时的 `attachments` 未落盘/未关联，列表统计信息（节点/边计数、状态分布）尚未补齐；缺 `DELETE /cases/{id}`（整案删除）。
+  - 交互流与反馈：已补 `interactions`/`rate_node`/`feedback`；后续可完善节点再生成、建议命令、状态轮询等。
+  - 附件与统计：创建案例时的 `attachments` 仍未与 files 路由建立关联；列表统计信息（节点/边计数、状态分布）待补。
   - 权限与审计：当前以用户归属粗粒度校验，尚未与 Open WebUI 的细粒度访问控制/审计打通。
 - 智能分析（Analysis）能力差距：
   - 规则/服务化：当前为轻量规则解析，尚未对齐 `backend/app/services/ai/log_parsing_service.py` 的完整规则、指标与建议模板；也未提供“文本+附件→IDP→分块→检索”全链路模式。
@@ -36,10 +50,10 @@
   - 尚无针对新增适配器/路由的单元测试与契约测试；缺 E2E 路径（上传→入库→检索→分析/案例）的回归用例。
 
 ## 三、下一步执行计划（按优先级）
-1) 案例功能补全（优先达成可用闭环）
-   - 路由：补充 `DELETE /api/v1/cases/{id}`、`POST /{case_id}/interaction`、`POST /{case_id}/nodes/{node_id}/rate`、`/feedback` 读写接口；与 `open_webui/models/feedbacks.py` 复用/整合。
-   - 数据：在现有 `Case/CaseNode/CaseEdge` 基础上扩展必要字段（如统计/标签），若需新增表则补 Alembic 迁移。
-   - 附件：与 `files` 路由打通，落盘与关系映射（多对多或元数据关联）。
+1) 案例功能补全（收尾）
+   - 路由：补充 节点再生成、节点知识建议命令、案例状态轮询等（参考 backend）；完善节点/边统计信息接口。
+   - 数据：在 `Case/CaseNode/CaseEdge` 基础上扩展标签/统计等字段（如需要，补迁移）。
+   - 附件：与 `files` 路由打通，建立附件与案例/节点的关联（多对多或元数据映射）。
 
 2) 智能分析增强
    - 抽象服务：将 `analysis_migrated.py` 解析逻辑上移为 `services/log_parsing_service.py` 风格组件，迁入完整规则库与建议模板；增强异常指标与摘要生成。

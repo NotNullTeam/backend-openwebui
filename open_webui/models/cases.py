@@ -160,6 +160,18 @@ class CasesTable:
             db.refresh(c)
             return CaseModel.model_validate(c)
 
+    def delete_case(self, case_id: str) -> bool:
+        with get_db() as db:
+            c = db.query(Case).filter_by(id=case_id).first()
+            if not c:
+                return False
+            # Delete nodes and edges first
+            db.query(CaseEdge).filter_by(case_id=case_id).delete()
+            db.query(CaseNode).filter_by(case_id=case_id).delete()
+            db.delete(c)
+            db.commit()
+            return True
+
     def create_node(
         self,
         case_id: str,
@@ -228,6 +240,18 @@ class CasesTable:
             db.delete(e)
             db.commit()
             return True
+
+    def update_node_metadata(self, node_id: str, patch: dict) -> Optional[CaseNodeModel]:
+        with get_db() as db:
+            n = db.query(CaseNode).filter_by(id=node_id).first()
+            if not n:
+                return None
+            current = n.metadata_ or {}
+            current.update(patch or {})
+            n.metadata_ = current
+            db.commit()
+            db.refresh(n)
+            return CaseNodeModel.model_validate(n)
 
     def list_cases_by_user(
         self,

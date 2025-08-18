@@ -16,6 +16,7 @@ from open_webui.config import (
     RAG_OPENAI_API_BASE_URL,
     RAG_OPENAI_API_KEY,
     RAG_AZURE_OPENAI_BASE_URL,
+    VECTOR_DB,
 )
 
 log = logging.getLogger(__name__)
@@ -239,7 +240,8 @@ def _search_related_knowledge(query: str, user_id: str, request: Request) -> Lis
                 agg.append(
                     {
                         "knowledge_id": kb.id,
-                        "score": float(res.distances[0][i]) if res.distances else 0.0,
+                        # distances semantics vary by backend; normalize later
+                        "distance": float(res.distances[0][i]) if res.distances else None,
                         "content": res.documents[0][i] if res.documents else "",
                         "metadata": res.metadatas[0][i] if res.metadatas else {},
                     }
@@ -248,6 +250,23 @@ def _search_related_knowledge(query: str, user_id: str, request: Request) -> Lis
             log.debug(f"kb search failed for {kb.id}: {e}")
             continue
 
-    # Weaviate 距离越小越相似，其他DB可能越大越好；这里统一按分数降序/升序混合：先存在分数降序，再截断
+    # 归一化分数：
+    for item in agg:
+        d = item.get("distance")
+        if d is None:
+            # 没有提供距离，无法归一化；设为0
+            item["score"] = 0.0
+        else:
+            if str(VECTOR_DB).lower() == "weaviate":
+                # 距离越小越相似，将其映射到(0,1]，越大越低
+                item["score"] = 1.0 / (1.0 + float(d))
+            else:
+                # 其他后端一般返回相似度或得分，保留为“越大越好”的语义
+                item["score"] = float(d)
+
     agg_sorted = sorted(agg, key=lambda x: x.get("score", 0), reverse=True)[:5]
+    # 输出统一结构
+    for it in agg_sorted:
+        if "distance" in it:
+            del it["distance"]
     return agg_sorted

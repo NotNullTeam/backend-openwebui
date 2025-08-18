@@ -108,6 +108,16 @@ backend-openwebui/
 
 > 迁移提示：首次引入 Cases 需执行数据库迁移（见“快速开始/初始化数据库”）。
 
+新增案例相关接口（节选）：
+- `GET /api/v1/cases`：列表/筛选/分页
+- `POST /api/v1/cases`：创建案例
+- `GET /api/v1/cases/{case_id}`：详情（含图谱）
+- `PUT /api/v1/cases/{case_id}`：更新标题/状态等
+- `DELETE /api/v1/cases/{case_id}`：删除案例（含节点/边）
+- `POST /api/v1/cases/{case_id}/nodes/{node_id}/rate`：节点评价
+- `POST /api/v1/cases/{case_id}/interactions`：新增一次交互（生成“用户补充信息”与“AI分析中”节点）
+- `PUT /api/v1/cases/{case_id}/feedback`、`GET /api/v1/cases/{case_id}/feedback`：案例反馈读写
+
 ---
 
 ## 常用 API 路由（节选）

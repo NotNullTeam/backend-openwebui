@@ -1,6 +1,7 @@
 import logging
 import json
 import time
+from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
@@ -19,6 +20,12 @@ from open_webui.models.knowledge import Knowledges
 from open_webui.retrieval.utils import get_embedding_function
 from open_webui.routers.retrieval import get_ef
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
+from open_webui.services.vendor_command_service import vendor_command_service
+from open_webui.services.ai.regenerate_service import (
+    build_regeneration_messages,
+    regenerate_with_model,
+)
+from open_webui.tasks import create_task, list_task_ids_by_item_id, stop_item_tasks
 from open_webui.config import (
     RAG_EMBEDDING_ENGINE,
     RAG_EMBEDDING_MODEL,
@@ -57,11 +64,134 @@ async def list_cases(
     )
 
 
-@router.post("/", response_model=CaseModel)
+@router.post("/")
 async def create_case(body: CaseCreateForm, user=Depends(get_verified_user)):
+    """
+    创建新案例并初始化图谱：
+    - 创建 USER_QUERY 节点（包含原始问题与附件）
+    - 创建 AI_ANALYSIS 处理节点（初始为 PROCESSING）
+    - 创建两者之间的边
+
+    返回结构对齐 backend：case 基本信息 + 初始化的 nodes/edges
+    """
     if not body.query or not body.query.strip():
         raise HTTPException(status_code=400, detail="query is required")
-    return cases_table.insert_new_case(user_id=user.id, form=body)
+
+    # 先创建案例
+    case = cases_table.insert_new_case(user_id=user.id, form=body)
+
+    # 再创建初始化节点与边
+    from open_webui.internal.db import get_db
+    from open_webui.models.cases import CaseNode, CaseEdge, Case
+    now = int(time.time())
+
+    # 允许 body 动态包含 title 字段
+    title = getattr(body, "title", None)
+    if title and len(title) > 200:
+        raise HTTPException(status_code=400, detail="title too long (<=200)")
+
+    user_node_id = None
+    ai_node_id = None
+    edge_id = None
+    with get_db() as db:
+        # 更新 title（如有）
+        if title:
+            row = db.query(Case).filter_by(id=case.id).first()
+            if row:
+                row.title = title
+                row.updated_at = now
+                db.commit()
+
+        # USER_QUERY 节点
+        user_node = CaseNode(
+            id=str(uuid4()),
+            case_id=case.id,
+            title="用户问题",
+            content=json_dumps_safe({
+                "text": body.query,
+                "attachments": getattr(body, "attachments", []) or [],
+            }),
+            node_type="USER_QUERY",
+            status="COMPLETED",
+            metadata_={"timestamp": now},
+            created_at=now,
+        )
+        db.add(user_node)
+        db.flush()
+        user_node_id = user_node.id
+
+        # AI_ANALYSIS 节点
+        ai_node = CaseNode(
+            id=str(uuid4()),
+            case_id=case.id,
+            title="AI分析中...",
+            content="",
+            node_type="AI_ANALYSIS",
+            status="PROCESSING",
+            metadata_={"timestamp": now},
+            created_at=now,
+        )
+        db.add(ai_node)
+        db.flush()
+        ai_node_id = ai_node.id
+
+        # 边：USER_QUERY -> AI_ANALYSIS
+        e = CaseEdge(
+            id=str(uuid4()),
+            case_id=case.id,
+            source_node_id=user_node_id,
+            target_node_id=ai_node_id,
+            edge_type="INITIAL",
+            metadata_={},
+        )
+        db.add(e)
+        db.flush()
+        edge_id = e.id
+
+        db.commit()
+
+    # 查询刚创建的节点，按 created_at 升序返回
+    from open_webui.models.cases import CaseNode as CN
+    with get_db() as db:
+        recents = (
+            db.query(CN)
+            .filter(CN.case_id == case.id)
+            .order_by(CN.created_at.asc())
+            .all()
+        )
+        nodes_out = [
+            {
+                "id": n.id,
+                "case_id": n.case_id,
+                "title": n.title,
+                "content": n.content,
+                "node_type": n.node_type,
+                "status": n.status,
+                "metadata": n.metadata_ or {},
+                "created_at": n.created_at,
+            }
+            for n in recents
+        ]
+
+    return {
+        "caseId": case.id,
+        "title": title or case.title,
+        "status": case.status,
+        "vendor": case.vendor,
+        "nodes": nodes_out,
+        "edges": [
+            {
+                "id": edge_id,
+                "case_id": case.id,
+                "source_node_id": user_node_id,
+                "target_node_id": ai_node_id,
+                "edge_type": "INITIAL",
+                "metadata": {},
+            }
+        ],
+        "createdAt": now,
+        "updatedAt": now,
+    }
 
 
 @router.get("/{case_id}", response_model=CaseWithGraphModel)
@@ -215,6 +345,58 @@ async def rate_node(case_id: str, node_id: str, body: RateNodeForm, user=Depends
     return {"rating": updated.metadata.get("rating") if hasattr(updated, "metadata") else None}
 
 
+class NodeUpdateForm(BaseModel):
+    title: Optional[str] = None
+    status: Optional[str] = None  # COMPLETED | AWAITING_USER_INPUT | PROCESSING
+    content: Optional[Any] = None
+    metadata: Optional[dict] = None
+
+
+@router.put("/{case_id}/nodes/{node_id}")
+async def update_node(case_id: str, node_id: str, body: NodeUpdateForm, user=Depends(get_verified_user)):
+    c = cases_table.get_case_with_graph_by_id(case_id)
+    if not c or c.user_id != user.id:
+        raise HTTPException(status_code=404, detail="case not found")
+    node = next((n for n in c.nodes if n.id == node_id), None)
+    if not node:
+        raise HTTPException(status_code=404, detail="node not found")
+
+    from open_webui.internal.db import get_db
+    from open_webui.models.cases import CaseNode, Case as CaseRow
+    now = int(time.time())
+    with get_db() as db:
+        n = db.query(CaseNode).filter_by(id=node_id, case_id=case_id).first()
+        if not n:
+            raise HTTPException(status_code=404, detail="node not found")
+        if body.title is not None:
+            n.title = body.title
+        if body.status is not None:
+            if body.status not in ["COMPLETED", "AWAITING_USER_INPUT", "PROCESSING"]:
+                raise HTTPException(status_code=400, detail="invalid node status")
+            n.status = body.status
+        if body.content is not None:
+            # 允许任意结构，统一存为字符串或JSON字符串
+            n.content = json_dumps_safe(body.content)
+        if body.metadata is not None:
+            cur = n.metadata_ or {}
+            cur.update(body.metadata)
+            n.metadata_ = cur
+        # 更新案例 updated_at
+        db.query(CaseRow).filter_by(id=case_id).update({"updated_at": now})
+        db.commit()
+        db.refresh(n)
+        return {
+            "id": n.id,
+            "case_id": n.case_id,
+            "title": n.title,
+            "content": n.content,
+            "node_type": n.node_type,
+            "status": n.status,
+            "metadata": n.metadata_ or {},
+            "created_at": n.created_at,
+        }
+
+
 class InteractionForm(BaseModel):
     parent_node_id: str
     response_data: Dict[str, Any]
@@ -351,6 +533,23 @@ async def get_case_feedback(case_id: str, user=Depends(get_verified_user)):
             if meta.get("case_id") == case_id:
                 return Feedbacks.get_feedback_by_id(r.id)
         raise HTTPException(status_code=404, detail="feedback not found")
+
+
+@router.get("/{case_id}/status")
+async def get_case_status(case_id: str, user=Depends(get_verified_user)):
+    """返回案例状态与处理中的节点，用于前端轮询。"""
+    c = cases_table.get_case_with_graph_by_id(case_id)
+    if not c or c.user_id != user.id:
+        raise HTTPException(status_code=404, detail="case not found")
+    processing = [n.model_dump() for n in c.nodes if n.status == "PROCESSING"]
+    awaiting = [n.model_dump() for n in c.nodes if n.status == "AWAITING_USER_INPUT"]
+    return {
+        "caseId": c.id,
+        "status": c.status,
+        "processingNodes": processing,
+        "awaitingUserInputNodes": awaiting,
+        "updatedAt": c.updated_at,
+    }
 
 
 # ---------- helpers ----------
@@ -507,6 +706,161 @@ async def get_node_knowledge(
             "strategy": "vector_search",
         },
     }
+
+
+@router.get("/{case_id}/nodes/{node_id}/commands")
+async def get_node_commands(case_id: str, node_id: str, vendor: Optional[str] = None, user=Depends(get_verified_user)):
+    """
+    厂商命令建议：
+    - 校验案例与节点归属
+    - 分析节点文本（content/title）推断问题类型
+    - 根据厂商模板返回命令清单，支持 context 占位替换
+    """
+    c = cases_table.get_case_with_graph_by_id(case_id)
+    if not c or c.user_id != user.id:
+        raise HTTPException(status_code=404, detail="case not found")
+    node = next((n for n in c.nodes if n.id == node_id), None)
+    if not node:
+        raise HTTPException(status_code=404, detail="node not found")
+
+    use_vendor = vendor or c.vendor
+    if not use_vendor:
+        return {"vendor": None, "commands": [], "supportedVendors": vendor_command_service.get_supported_vendors()}
+
+    # 解析 content
+    text = ""
+    raw = node.content or ""
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            text = str(obj.get("text") or obj.get("analysis") or obj.get("answer") or "")
+        else:
+            text = str(obj)
+    except Exception:
+        text = str(raw)
+
+    ctx = node.metadata or {}
+    cmds = vendor_command_service.generate_commands(text, node.title or "", use_vendor, ctx)
+    return {"vendor": use_vendor, "commands": cmds}
+
+
+class RegenerateForm(BaseModel):
+    prompt: Optional[str] = None
+    regeneration_strategy: Optional[str] = None
+    model: Optional[str] = None  # 可选模型ID提示，默认使用任务模型选择逻辑
+    async_mode: Optional[bool] = True
+
+
+@router.post("/{case_id}/nodes/{node_id}/regenerate")
+async def regenerate_node(case_id: str, node_id: str, body: RegenerateForm, request: Request, user=Depends(get_verified_user)):
+    """
+    重新生成节点内容：
+    - 复用 Open WebUI 通用模型接口 `generate_chat_completion`
+    - 使用任务模型选择逻辑（支持自定义 TASK_MODEL / TASK_MODEL_EXTERNAL）
+    - 非流式执行，直接返回更新后的节点
+    """
+    c = cases_table.get_case_with_graph_by_id(case_id)
+    if not c or c.user_id != user.id:
+        raise HTTPException(status_code=404, detail="case not found")
+    from open_webui.internal.db import get_db
+    from open_webui.models.cases import CaseNode
+    now = int(time.time())
+    # 内部任务逻辑
+    async def _regenerate_task():
+        from open_webui.internal.db import get_db as _get_db
+        from open_webui.models.cases import CaseNode as _CN
+        with _get_db() as db2:
+            n2 = db2.query(_CN).filter_by(id=node_id, case_id=case_id).first()
+            if not n2:
+                return
+            # 构造消息
+            try:
+                obj = json.loads(n2.content or "")
+                if isinstance(obj, dict):
+                    base_text = obj.get("text") or obj.get("analysis") or obj.get("answer") or ""
+                else:
+                    base_text = str(obj)
+            except Exception:
+                base_text = n2.content or ""
+
+        messages = build_regeneration_messages(
+            original_text=str(base_text),
+            user_prompt=body.prompt,
+            strategy=body.regeneration_strategy,
+            language="zh",
+        )
+
+        content = await regenerate_with_model(
+            request,
+            user,
+            messages,
+            model_hint=body.model,
+            metadata={
+                "task": "case_node_regenerate",
+                "case_id": case_id,
+                "node_id": node_id,
+            },
+        )
+
+        with _get_db() as db2:
+            n2 = db2.query(_CN).filter_by(id=node_id, case_id=case_id).first()
+            if not n2:
+                return
+            n2.content = content
+            n2.status = "COMPLETED"
+            n2.metadata_ = {**(n2.metadata_ or {}), "regenerated": True, "regenerated_at": int(time.time())}
+            db2.commit()
+
+    # 提交任务前标记节点为 PROCESSING
+    from open_webui.internal.db import get_db
+    from open_webui.models.cases import CaseNode
+    with get_db() as db:
+        n = db.query(CaseNode).filter_by(id=node_id, case_id=case_id).first()
+        if not n:
+            raise HTTPException(status_code=404, detail="node not found")
+        n.status = "PROCESSING"
+        db.commit()
+
+    if body.async_mode is not False:
+        # 创建后台任务并返回任务ID
+        task_id, _ = await create_task(request.app.state.redis, _regenerate_task(), id=node_id)
+        return {"taskId": task_id, "nodeId": node_id, "status": "submitted"}
+    else:
+        # 同步执行（不推荐）
+        await _regenerate_task()
+        return {"taskId": None, "nodeId": node_id, "status": "completed"}
+
+
+@router.get("/{case_id}/nodes/{node_id}/tasks")
+async def list_node_tasks(case_id: str, node_id: str, request: Request, user=Depends(get_verified_user)):
+    c = cases_table.get_case_with_graph_by_id(case_id)
+    if not c or c.user_id != user.id or not any(n.id == node_id for n in c.nodes):
+        raise HTTPException(status_code=404, detail="node not found")
+    task_ids = await list_task_ids_by_item_id(request.app.state.redis, node_id)
+    return {"task_ids": task_ids}
+
+
+@router.post("/{case_id}/nodes/{node_id}/tasks/stop")
+async def stop_node_tasks(case_id: str, node_id: str, request: Request, user=Depends(get_verified_user)):
+    c = cases_table.get_case_with_graph_by_id(case_id)
+    if not c or c.user_id != user.id or not any(n.id == node_id for n in c.nodes):
+        raise HTTPException(status_code=404, detail="node not found")
+    res = await stop_item_tasks(request.app.state.redis, node_id)
+    return res
+
+
+@router.get("/{case_id}/stats")
+async def get_case_stats(case_id: str, user=Depends(get_verified_user)):
+    """节点/边统计信息接口。"""
+    c = cases_table.get_case_with_graph_by_id(case_id)
+    if not c or c.user_id != user.id:
+        raise HTTPException(status_code=404, detail="case not found")
+    node_count = len(c.nodes)
+    edge_count = len(c.edges)
+    types: Dict[str, int] = {}
+    for n in c.nodes:
+        types[n.node_type] = types.get(n.node_type, 0) + 1
+    return {"nodeCount": node_count, "edgeCount": edge_count, "nodeTypeDistribution": types}
 
 
 # --- 画布布局 保存/获取 ---

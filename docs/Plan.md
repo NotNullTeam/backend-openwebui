@@ -28,6 +28,15 @@
   - 新增：`GET /api/v1/cases/{case_id}/nodes`、`GET /api/v1/cases/{case_id}/edges`、`GET /api/v1/cases/{case_id}/nodes/{node_id}`（节点/边列表与节点详情）
   - 新增：`GET /api/v1/cases/{case_id}/nodes/{node_id}/knowledge`（节点知识溯源，向量检索+分数归一）
   - 新增：`PUT /api/v1/cases/{case_id}/layout`、`GET /api/v1/cases/{case_id}/layout`（画布布局保存/读取，落盘于 Case.metadata）
+  - 新增：`POST /api/v1/cases/`（创建案例时同步创建 `USER_QUERY` 与 `AI_ANALYSIS` 初始节点并建立边；将 `attachments` 挂在 `USER_QUERY` 节点的 `content` 中）
+  - 新增：`PUT /api/v1/cases/{case_id}/nodes/{node_id}`（节点更新：标题/状态/内容/元数据）
+  - 新增：`GET /api/v1/cases/{case_id}/status`（案例状态轮询：返回 PROCESSING 与 AWAITING_USER_INPUT 节点）
+  - 新增：`GET /api/v1/cases/{case_id}/nodes/{node_id}/commands`（接入 `open_webui/services/vendor_command_service.py`，按节点内容+厂商返回命令建议，支持 context 占位替换）
+  - 新增：`GET /api/v1/cases/{case_id}/stats`（节点/边统计信息）
+  - 升级：`POST /api/v1/cases/{case_id}/nodes/{node_id}/regenerate`（调用 Open WebUI 通用模型接口 `generate_chat_completion` 完成真实再生成功能；默认非流式，直接落库并返回）
+  - 兼容路由：新增 `system_migrated`
+    - `GET /api/v1/system/health`、`GET /api/v1/system/statistics`（最小健康检查与统计）
+  - 用户设置已统一回用原生端点：`GET /api/v1/users/user/settings`、`POST /api/v1/users/user/settings/update`
 - 数据结构：
   - `Case` 增加 `metadata` JSON 字段（Alembic 迁移：`b1c2d3e4f5a6_add_case_metadata.py`）
 - 分析（Analysis）：
@@ -36,7 +45,7 @@
 ## 二、差距与风险（未完成/需完善）
 - 案例（Cases）能力缺口：
   - 交互流与反馈：已补 `interactions`/`rate_node`/`feedback`；后续可完善节点再生成、建议命令、状态轮询等。
-  - 附件与统计：创建案例时的 `attachments` 仍未与 files 路由建立关联；列表统计信息（节点/边计数、状态分布）待补。
+  - 附件与统计：创建案例时的 `attachments` 已记录于首个 `USER_QUERY` 节点 `content` 中，但尚未与 `files` 路由建立强关联；列表统计信息已提供按案例的统计接口，但全局/分页聚合仍待补。
   - 权限与审计：当前以用户归属粗粒度校验，尚未与 Open WebUI 的细粒度访问控制/审计打通。
 - 智能分析（Analysis）能力差距：
   - 规则/服务化：当前为轻量规则解析，尚未对齐 `backend/app/services/ai/log_parsing_service.py` 的完整规则、指标与建议模板；也未提供“文本+附件→IDP→分块→检索”全链路模式。
@@ -51,7 +60,7 @@
 
 ## 三、下一步执行计划（按优先级）
 1) 案例功能补全（收尾）
-   - 路由：补充 节点再生成、节点知识建议命令、案例状态轮询等（参考 backend）；完善节点/边统计信息接口。
+   - 路由：将再生成扩展为可选异步任务与状态回传（复用 `open_webui/tasks.py`），并提供停止/查询接口；完善列表维度的统计聚合接口。
    - 数据：在 `Case/CaseNode/CaseEdge` 基础上扩展标签/统计等字段（如需要，补迁移）。
    - 附件：与 `files` 路由打通，建立附件与案例/节点的关联（多对多或元数据映射）。
 
@@ -76,6 +85,11 @@
 6) 文档与运维
    - README：在 `backend-openwebui/README.md` 增补典型部署/环境变量清单与迁移指引。
    - 监控：接入基础健康检查/审计日志（复用 Open WebUI 中间件），在后续阶段考虑 OTEL。
+
+7) 兼容路由（已初步打通）
+   - `system`：健康与统计。
+   - `user`：已统一到原生端点。
+   - `knowledge`：统一通过原生检索/上传管线并配置 `CONTENT_EXTRACTION_ENGINE=alibaba_idp` 使用阿里IDP。
 
 ---
 

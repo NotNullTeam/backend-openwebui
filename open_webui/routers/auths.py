@@ -38,7 +38,8 @@ from open_webui.config import OPENID_PROVIDER_URL, ENABLE_OAUTH_SIGNUP, ENABLE_L
 from pydantic import BaseModel
 
 from open_webui.utils.misc import parse_duration, validate_email_format
-from open_webui.utils.auth import (
+from open_webui.services.token_blacklist import token_blacklist
+from open_webui.utils.utils import (
     decode_token,
     create_api_key,
     create_token,
@@ -664,6 +665,20 @@ async def signup(request: Request, response: Response, form_data: SignupForm):
 
 @router.get("/signout")
 async def signout(request: Request, response: Response):
+    # Get token from cookie or header
+    token = request.cookies.get("token")
+    
+    if token:
+        try:
+            # Decode token to get expiration time
+            decoded = decode_token(token)
+            if decoded and "exp" in decoded:
+                # Add token to blacklist
+                token_blacklist.add_to_blacklist(token, decoded["exp"])
+                log.info(f"Token added to blacklist for user: {decoded.get('id', 'unknown')}")
+        except Exception as e:
+            log.warning(f"Failed to blacklist token during signout: {e}")
+    
     response.delete_cookie("token")
     response.delete_cookie("oui-session")
 

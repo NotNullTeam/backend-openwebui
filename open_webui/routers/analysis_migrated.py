@@ -9,6 +9,11 @@ from open_webui.models.knowledge import Knowledges
 from open_webui.retrieval.utils import get_embedding_function
 from open_webui.routers.retrieval import get_ef
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
+from open_webui.services.log_parsing_service import log_parsing_service
+from open_webui.retrieval.vector.similarity_normalizer import (
+    similarity_normalizer,
+    get_db_type_from_config
+)
 from open_webui.config import (
     RAG_EMBEDDING_ENGINE,
     RAG_EMBEDDING_MODEL,
@@ -50,150 +55,57 @@ async def parse_log(req: LogParsingRequest, request: Request, user=Depends(get_v
     if not req.logContent or not req.logContent.strip():
         raise HTTPException(status_code=400, detail="logContent is required")
 
-    # 2) 解析日志（参考 backend 的规则，做轻量实现）
-    parsed = _parse_log_simple(req.logType, req.vendor, req.logContent, req.contextInfo or {})
-
-    # 3) 生成相关知识（基于可访问的知识库做向量检索）
     try:
-        related = _search_related_knowledge(
-            query=_build_query_from_parsed(parsed, req),
-            user_id=user.id,
-            request=request,
+        # 2) 使用完整的日志解析服务
+        parsed = log_parsing_service.parse_log(
+            log_type=req.logType,
+            vendor=req.vendor,
+            log_content=req.logContent,
+            context_info=req.contextInfo
         )
+
+        # 3) 生成相关知识（基于可访问的知识库做向量检索）
+        try:
+            related = _search_related_knowledge(
+                query=_build_query_from_parsed(parsed, req),
+                user_id=user.id,
+                request=request,
+            )
+        except Exception as e:
+            log.warning(f"related_knowledge search failed: {e}")
+            related = []
+
+        # 4) 确定整体严重性
+        severity = "low"
+        anomalies = parsed.get("anomalies", [])
+        if any(a.get("severity") == "high" for a in anomalies):
+            severity = "high"
+        elif any(a.get("severity") == "medium" for a in anomalies):
+            severity = "medium"
+
+        # 5) 汇总结果
+        return LogParsingResponse(
+            parsed_data=parsed,
+            analysis_result={
+                "summary": parsed.get("summary"),
+                "anomalies": anomalies,
+                "keyEvents": parsed.get("keyEvents", []),
+                "logMetrics": parsed.get("logMetrics", {})
+            },
+            severity=severity,
+            recommendations=[r.get("action") for r in parsed.get("suggestedActions", [])],
+            related_knowledge=related,
+        )
+
     except Exception as e:
-        log.warning(f"related_knowledge search failed: {e}")
-        related = []
-
-    # 4) 汇总结果
-    return LogParsingResponse(
-        parsed_data=parsed,
-        analysis_result={
-            "summary": parsed.get("summary"),
-            "anomalies": parsed.get("anomalies", []),
-            "keyEvents": parsed.get("keyEvents", []),
-        },
-        severity=parsed.get("severity"),
-        recommendations=[r.get("action") for r in parsed.get("suggestedActions", [])],
-        related_knowledge=related,
-    )
-
-
-# ============ 内部实现（轻量版） ============
-_RULES = {
-    "ospf_debug": {
-        "patterns": {
-            "mtu_mismatch": r"MTU mismatch|packet too big|DD packet size exceeds|MTU不匹配",
-            "neighbor_stuck": r"ExStart|neighbor stuck|邻居状态|neighbor state",
-            "authentication_fail": r"authentication|认证失败|auth fail",
-            "area_mismatch": r"area mismatch|区域不匹配|different area",
-            "hello_timer": r"hello timer|hello interval|hello间隔",
-        },
-        "severities": {
-            "mtu_mismatch": "high",
-            "neighbor_stuck": "high",
-            "authentication_fail": "high",
-            "area_mismatch": "medium",
-            "hello_timer": "medium",
-        },
-    },
-    "system_log": {
-        "patterns": {
-            "interface_down": r"interface.*down|接口.*down|link down",
-            "memory_high": r"memory.*high|内存.*高|out of memory",
-            "cpu_high": r"cpu.*high|CPU.*高|cpu utilization",
-        },
-        "severities": {
-            "interface_down": "high",
-            "memory_high": "high",
-            "cpu_high": "medium",
-        },
-    },
-}
-
-
-def _parse_log_simple(log_type: str, vendor: str, content: str, ctx: Dict[str, Any]) -> Dict[str, Any]:
-    import re
-
-    rules = _RULES.get(log_type, {})
-    patterns = rules.get("patterns", {})
-    severities = rules.get("severities", {})
-
-    anomalies: List[Dict[str, Any]] = []
-    for name, pat in patterns.items():
-        m = re.search(pat, content, flags=re.IGNORECASE | re.MULTILINE)
-        if not m:
-            continue
-        line_start = max(0, content.rfind("\n", 0, m.start()) + 1)
-        line_end = content.find("\n", m.end())
-        if line_end == -1:
-            line_end = len(content)
-        evidence = content[line_start:line_end].strip()
-        anomalies.append(
-            {
-                "type": name.upper(),
-                "severity": severities.get(name, "medium"),
-                "evidence": [evidence],
-                "lineNumber": content[: m.start()].count("\n") + 1,
-            }
+        log.error(f"Log parsing failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"日志解析失败: {str(e)}"
         )
 
-    severity = "low"
-    if any(a["severity"] == "high" for a in anomalies):
-        severity = "high"
-    elif any(a["severity"] == "medium" for a in anomalies):
-        severity = "medium"
 
-    suggested = _suggest_actions(anomalies, vendor)
-    summary = _build_summary(anomalies, log_type, vendor)
-
-    return {
-        "summary": summary,
-        "anomalies": anomalies,
-        "suggestedActions": suggested,
-        "keyEvents": [a.get("evidence", [""])[0] for a in anomalies][:5],
-        "severity": severity,
-    }
-
-
-def _suggest_actions(anomalies: List[Dict[str, Any]], vendor: str) -> List[Dict[str, Any]]:
-    template = {
-        "mtu_mismatch": {
-            "action": "检查并统一接口MTU配置",
-            "commands": {
-                "Huawei": ["display interface GE0/0/1", "interface GE0/0/1", "mtu 1500", "commit"],
-                "Cisco": ["show interface Gi0/0", "conf t", "int Gi0/0", "mtu 1500", "end"],
-            },
-        },
-        "neighbor_stuck": {
-            "action": "重置OSPF进程并检查配置",
-            "commands": {
-                "Huawei": ["reset ospf process", "display ospf peer"],
-                "Cisco": ["clear ip ospf process", "show ip ospf neighbor"],
-            },
-        },
-        "interface_down": {
-            "action": "检查接口物理状态和配置",
-            "commands": {
-                "Huawei": ["display interface GE0/0/1", "undo shutdown"],
-                "Cisco": ["show interface Gi0/0", "no shutdown"],
-            },
-        },
-    }
-
-    out = []
-    for a in anomalies:
-        t = template.get(a["type"].lower()) or template.get(a["type"].lower().split("_")[0])
-        if t:
-            cmds = t["commands"].get(vendor.capitalize()) or next(iter(t["commands"].values()))
-            out.append({"action": t["action"], "commands": cmds})
-    return out
-
-
-def _build_summary(anomalies: List[Dict[str, Any]], log_type: str, vendor: str) -> str:
-    if not anomalies:
-        return f"未检测到明显异常（日志类型: {log_type}, 厂商: {vendor}）。"
-    types = ", ".join(sorted({a["type"] for a in anomalies}))
-    return f"检测到异常类型：{types}。请根据建议进行排查处理。"
+# ============ 辅助函数 ============
 
 
 def _build_query_from_parsed(parsed: Dict[str, Any], req: LogParsingRequest) -> str:
@@ -240,7 +152,6 @@ def _search_related_knowledge(query: str, user_id: str, request: Request) -> Lis
                 agg.append(
                     {
                         "knowledge_id": kb.id,
-                        # distances semantics vary by backend; normalize later
                         "distance": float(res.distances[0][i]) if res.distances else None,
                         "content": res.documents[0][i] if res.documents else "",
                         "metadata": res.metadatas[0][i] if res.metadatas else {},
@@ -250,23 +161,29 @@ def _search_related_knowledge(query: str, user_id: str, request: Request) -> Lis
             log.debug(f"kb search failed for {kb.id}: {e}")
             continue
 
-    # 归一化分数：
-    for item in agg:
-        d = item.get("distance")
-        if d is None:
-            # 没有提供距离，无法归一化；设为0
-            item["score"] = 0.0
-        else:
-            if str(VECTOR_DB).lower() == "weaviate":
-                # 距离越小越相似，将其映射到(0,1]，越大越低
-                item["score"] = 1.0 / (1.0 + float(d))
-            else:
-                # 其他后端一般返回相似度或得分，保留为“越大越好”的语义
-                item["score"] = float(d)
-
-    agg_sorted = sorted(agg, key=lambda x: x.get("score", 0), reverse=True)[:5]
-    # 输出统一结构
-    for it in agg_sorted:
-        if "distance" in it:
-            del it["distance"]
-    return agg_sorted
+    # 使用统一的相似度归一化
+    if agg:
+        db_type = get_db_type_from_config(str(VECTOR_DB))
+        agg_normalized = similarity_normalizer.normalize_search_results(
+            agg, db_type, score_key="distance"
+        )
+        
+        # 应用质量阈值过滤
+        threshold = similarity_normalizer.get_similarity_threshold(db_type, "medium")
+        agg_filtered = similarity_normalizer.filter_by_threshold(
+            agg_normalized, threshold, score_key="score"
+        )
+        
+        # 取Top-5
+        agg_sorted = agg_filtered[:5]
+        
+        # 清理输出结构
+        for item in agg_sorted:
+            if "distance" in item:
+                del item["distance"]
+            if "raw_distance" in item:
+                del item["raw_distance"]
+        
+        return agg_sorted
+    
+    return []

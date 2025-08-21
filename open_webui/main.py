@@ -48,6 +48,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import Response, StreamingResponse
+
+from open_webui.middleware.rate_limiter import RateLimitMiddleware
 from starlette.datastructures import Headers
 
 
@@ -61,34 +63,46 @@ from open_webui.socket.main import (
     get_active_user_ids,
 )
 from open_webui.routers import (
-    audio,
-    images,
-    ollama,
-    openai,
-    retrieval,
-    pipelines,
-    tasks,
+    admin,
+    apps,
     auths,
+    auth,
     channels,
     chats,
     notes,
+    chat,
+    evaluations,
     folders,
+    onedrive,
     configs,
-    groups,
     files,
     functions,
+    groups,
+    images,
     memories,
+    audio,
+    tools,
     models,
     knowledge,
+    knowledge_migrated,
     prompts,
-    evaluations,
-    tools,
     users,
     utils,
+    pipelines,
+    retrieval,
+    workspace,
     scim,
+    # 迁移的端点模块
     analysis_migrated,
     cases_migrated,
     system_migrated,
+    notifications,
+    statistics,
+    settings,
+    search,
+    dev,
+    vendor_commands,
+    document_summary,
 )
 
 from open_webui.routers.retrieval import (
@@ -1197,11 +1211,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Add rate limiting middleware
+rate_limit_config = {
+    "global_limit": 1000,
+    "global_window": 60,
+    "user_limit": 100,
+    "user_window": 60,
+    "ip_limit": 50,
+    "ip_window": 60,
+    "path_limits": {
+        "/api/v1/analysis": {"limit": 10, "window": 60},
+        "/api/v1/knowledge/documents/upload": {"limit": 20, "window": 60},
+        "/api/v1/cases/batch": {"limit": 5, "window": 60},
+    }
+}
+app.add_middleware(RateLimitMiddleware, config=rate_limit_config)
+
 
 app.mount("/ws", socket_app)
 
 
 app.include_router(ollama.router, prefix="/ollama", tags=["ollama"])
+{{ ... }}
 app.include_router(openai.router, prefix="/openai", tags=["openai"])
 
 
@@ -1216,6 +1247,7 @@ app.include_router(configs.router, prefix="/api/v1/configs", tags=["configs"])
 
 app.include_router(auths.router, prefix="/api/v1/auths", tags=["auths"])
 app.include_router(users.router, prefix="/api/v1/users", tags=["users"])
+app.include_router(user_settings.router, tags=["user_settings"])
 
 
 app.include_router(channels.router, prefix="/api/v1/channels", tags=["channels"])
@@ -1242,6 +1274,23 @@ app.include_router(utils.router, prefix="/api/v1/utils", tags=["utils"])
 app.include_router(analysis_migrated.router, prefix="/api/v1/analysis", tags=["analysis"])
 app.include_router(cases_migrated.router, prefix="/api/v1/cases", tags=["cases"])
 app.include_router(system_migrated.router, prefix="/api/v1/system", tags=["system"])
+app.include_router(statistics.router, prefix="/api/v1/statistics", tags=["statistics"])
+app.include_router(settings.router, prefix="/api/v1/settings", tags=["settings"])
+app.include_router(search.router, prefix="/api/v1/search", tags=["search"])
+
+# New authentication and notification endpoints
+app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
+app.include_router(notifications.router, prefix="/api/v1", tags=["notifications"])
+
+# Development debug module
+app.include_router(dev.router, prefix="/api/v1/dev", tags=["development"])
+
+# New critical endpoints for missing features
+app.include_router(vendor_commands.router, prefix="/api/v1/vendor", tags=["vendor_commands"])
+app.include_router(document_summary.router, prefix="/api/v1", tags=["document_summary"])
+
+# Knowledge management migrated endpoints
+app.include_router(knowledge_migrated.router, prefix="/api/v1/knowledge", tags=["knowledge_migrated"])
 
 # SCIM 2.0 API for identity management
 if SCIM_ENABLED:

@@ -1,4 +1,6 @@
 __pycache__
+.venv
+.vscode
 .env
 _old
 uploads
@@ -25,3 +27,4 @@ Pipfile
 /Lib
 /Scripts
 /share
+.pytest_cache/

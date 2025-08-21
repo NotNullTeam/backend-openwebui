@@ -37,6 +37,7 @@ from open_webui.routers.retrieval import ProcessFileForm, process_file
 from open_webui.routers.audio import transcribe
 from open_webui.storage.provider import Storage
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.services.security_scanner import scan_file_security, ScanResult
 from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
@@ -44,6 +45,22 @@ log.setLevel(SRC_LOG_LEVELS["MODELS"])
 
 
 router = APIRouter()
+
+
+# 批量上传结果模型将在下面定义
+class BatchUploadResult(BaseModel):
+    """批量上传结果模型"""
+    fileName: str
+    status: str
+    error: Optional[str] = None
+    fileId: Optional[str] = None
+    url: Optional[str] = None
+
+
+class BatchUploadResponse(BaseModel):
+    """批量上传响应模型"""
+    uploadResults: list[BatchUploadResult]
+    summary: dict
 
 
 ############################
@@ -274,6 +291,152 @@ async def search_files(
                 del file.data["content"]
 
     return matching_files
+
+
+############################
+# Upload Multiple Files (Batch)
+############################
+
+
+class BatchUploadResponse(BaseModel):
+    files: list[FileModelResponse]
+    errors: list[dict] = []
+    
+
+@router.post("/batch", response_model=BatchUploadResponse)
+async def upload_files_batch(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    metadata: Optional[str] = Form(None),
+    process: bool = Query(True),
+    user=Depends(get_verified_user),
+):
+    """
+    Upload multiple files at once.
+    Returns successfully uploaded files and any errors encountered.
+    """
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except json.JSONDecodeError:
+            metadata = {}
+    
+    file_metadata = metadata if metadata else {}
+    
+    uploaded_files = []
+    errors = []
+    
+    # Validate file extensions first
+    if request.app.state.config.ALLOWED_FILE_EXTENSIONS:
+        allowed_extensions = [
+            ext for ext in request.app.state.config.ALLOWED_FILE_EXTENSIONS if ext
+        ]
+        
+        for file in files:
+            filename = os.path.basename(file.filename)
+            file_extension = os.path.splitext(filename)[1]
+            file_extension = file_extension[1:] if file_extension else ""
+            
+            if file_extension not in allowed_extensions:
+                errors.append({
+                    "filename": file.filename,
+                    "error": f"File type {file_extension} is not allowed"
+                })
+                continue
+    
+    # Process each file
+    for file in files:
+        try:
+            unsanitized_filename = file.filename
+            filename = os.path.basename(unsanitized_filename)
+            
+            # Generate unique ID for each file
+            id = str(uuid.uuid4())
+            name = filename
+            filename = f"{id}_{filename}"
+            
+            tags = {
+                "OpenWebUI-User-Email": user.email,
+                "OpenWebUI-User-Id": user.id,
+                "OpenWebUI-User-Name": user.name,
+                "OpenWebUI-File-Id": id,
+            }
+            
+            # Upload file to storage
+            contents, file_path = Storage.upload_file(file.file, filename, tags)
+            
+            # Insert file record
+            file_item = Files.insert_new_file(
+                user.id,
+                FileForm(
+                    **{
+                        "id": id,
+                        "filename": name,
+                        "path": file_path,
+                        "meta": {
+                            "name": name,
+                            "content_type": file.content_type,
+                            "size": len(contents),
+                            "data": file_metadata,
+                        },
+                    }
+                ),
+            )
+            
+            # Process file if requested
+            if process and file_item:
+                try:
+                    if file.content_type:
+                        stt_supported_content_types = getattr(
+                            request.app.state.config, "STT_SUPPORTED_CONTENT_TYPES", []
+                        )
+                        
+                        if any(
+                            fnmatch(file.content_type, content_type)
+                            for content_type in (
+                                stt_supported_content_types
+                                if stt_supported_content_types
+                                and any(t.strip() for t in stt_supported_content_types)
+                                else ["audio/*", "video/webm"]
+                            )
+                        ):
+                            file_path_local = Storage.get_file(file_path)
+                            result = transcribe(request, file_path_local, file_metadata)
+                            
+                            process_file(
+                                request,
+                                ProcessFileForm(file_id=id, content=result.get("text", "")),
+                                user=user,
+                            )
+                        elif (not file.content_type.startswith(("image/", "video/"))) or (
+                            request.app.state.config.CONTENT_EXTRACTION_ENGINE == "external"
+                        ):
+                            process_file(request, ProcessFileForm(file_id=id), user=user)
+                    else:
+                        process_file(request, ProcessFileForm(file_id=id), user=user)
+                    
+                    file_item = Files.get_file_by_id(id=id)
+                except Exception as e:
+                    log.exception(e)
+                    log.error(f"Error processing file: {file_item.id}")
+                    file_item = FileModelResponse(
+                        **{
+                            **file_item.model_dump(),
+                            "error": str(e.detail) if hasattr(e, "detail") else str(e),
+                        }
+                    )
+            
+            if file_item:
+                uploaded_files.append(file_item)
+                
+        except Exception as e:
+            log.exception(e)
+            errors.append({
+                "filename": file.filename,
+                "error": str(e.detail) if hasattr(e, "detail") else str(e)
+            })
+    
+    return BatchUploadResponse(files=uploaded_files, errors=errors)
 
 
 ############################
@@ -583,6 +746,190 @@ async def get_file_content_by_id(id: str, user=Depends(get_verified_user)):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
+
+
+############################
+# Security Scan File By Id
+############################
+
+
+@router.post("/{id}/scan", response_model=ScanResult)
+async def scan_file_security_by_id(id: str, user=Depends(get_verified_user)):
+    """
+    对指定文件进行安全扫描
+    
+    - **id**: 文件ID
+    
+    返回扫描结果，包括安全状态、风险等级、威胁信息等
+    """
+    file = Files.get_file_by_id(id)
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if not (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "read", user)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    try:
+        # 获取文件路径
+        file_path = Storage.get_file(file.path)
+        
+        if not os.path.exists(file_path):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="文件不存在于存储中",
+            )
+        
+        # 执行安全扫描
+        scan_result = scan_file_security(file_path, file.filename)
+        
+        # 记录扫描日志
+        log.info(f"File security scan completed for {id}: safe={scan_result.is_safe}, risk={scan_result.risk_level}")
+        
+        return scan_result
+        
+    except Exception as e:
+        log.exception(f"Error scanning file {id}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"文件安全扫描失败: {str(e)}",
+        )
+
+
+############################
+# Batch Security Scan Files
+############################
+
+
+class BatchScanRequest(BaseModel):
+    file_ids: List[str]
+
+
+class BatchScanResponse(BaseModel):
+    results: Dict[str, ScanResult]
+    summary: Dict[str, int]
+
+
+@router.post("/batch/scan", response_model=BatchScanResponse)
+async def batch_scan_files_security(
+    request: BatchScanRequest,
+    user=Depends(get_verified_user)
+):
+    """
+    批量扫描多个文件的安全性
+    
+    - **file_ids**: 文件ID列表
+    
+    返回每个文件的扫描结果和汇总信息
+    """
+    if not request.file_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="文件ID列表不能为空",
+        )
+    
+    if len(request.file_ids) > 50:  # 限制批量扫描数量
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="批量扫描文件数量不能超过50个",
+        )
+    
+    results = {}
+    summary = {"safe": 0, "unsafe": 0, "error": 0}
+    
+    for file_id in request.file_ids:
+        try:
+            file = Files.get_file_by_id(file_id)
+            
+            if not file:
+                results[file_id] = ScanResult(
+                    is_safe=False,
+                    risk_level="high",
+                    threats=["文件不存在"],
+                    file_type="unknown",
+                    file_size=0,
+                    md5_hash="",
+                    scan_time=0,
+                    details={"error": "文件不存在"}
+                )
+                summary["error"] += 1
+                continue
+            
+            # 检查权限
+            if not (
+                file.user_id == user.id
+                or user.role == "admin"
+                or has_access_to_file(file_id, "read", user)
+            ):
+                results[file_id] = ScanResult(
+                    is_safe=False,
+                    risk_level="high",
+                    threats=["无访问权限"],
+                    file_type="unknown",
+                    file_size=0,
+                    md5_hash="",
+                    scan_time=0,
+                    details={"error": "无访问权限"}
+                )
+                summary["error"] += 1
+                continue
+            
+            # 获取文件路径并扫描
+            file_path = Storage.get_file(file.path)
+            
+            if not os.path.exists(file_path):
+                results[file_id] = ScanResult(
+                    is_safe=False,
+                    risk_level="high",
+                    threats=["文件不存在于存储中"],
+                    file_type="unknown",
+                    file_size=0,
+                    md5_hash="",
+                    scan_time=0,
+                    details={"error": "文件不存在于存储中"}
+                )
+                summary["error"] += 1
+                continue
+            
+            # 执行扫描
+            scan_result = scan_file_security(file_path, file.filename)
+            results[file_id] = scan_result
+            
+            if scan_result.is_safe:
+                summary["safe"] += 1
+            else:
+                summary["unsafe"] += 1
+                
+        except Exception as e:
+            log.exception(f"Error scanning file {file_id}")
+            results[file_id] = ScanResult(
+                is_safe=False,
+                risk_level="high",
+                threats=[f"扫描失败: {str(e)}"],
+                file_type="unknown",
+                file_size=0,
+                md5_hash="",
+                scan_time=0,
+                details={"error": str(e)}
+            )
+            summary["error"] += 1
+    
+    log.info(f"Batch security scan completed: {summary}")
+    
+    return BatchScanResponse(
+        results=results,
+        summary=summary
+    )
 
 
 ############################

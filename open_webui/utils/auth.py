@@ -22,6 +22,7 @@ from typing import Optional, Union, List, Dict
 from opentelemetry import trace
 
 from open_webui.models.users import Users
+from open_webui.services.token_blacklist import token_blacklist
 
 from open_webui.constants import ERROR_MESSAGES
 
@@ -263,6 +264,15 @@ def get_current_user(
     # auth by jwt token
     try:
         data = decode_token(token)
+        
+        # Check if token is blacklisted
+        if token_blacklist.is_blacklisted(token):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token has been revoked",
+            )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

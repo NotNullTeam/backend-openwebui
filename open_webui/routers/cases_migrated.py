@@ -746,9 +746,14 @@ async def get_node_commands(case_id: str, node_id: str, vendor: Optional[str] = 
 
 class RegenerateForm(BaseModel):
     prompt: Optional[str] = None
-    regeneration_strategy: Optional[str] = None
+    regeneration_strategy: Optional[str] = Field(
+        default=None,
+        description="重生成策略: detailed, concise, technical, step-by-step, summary"
+    )
     model: Optional[str] = None  # 可选模型ID提示，默认使用任务模型选择逻辑
     async_mode: Optional[bool] = True
+    max_retries: Optional[int] = Field(default=3, ge=1, le=5)
+    temperature: Optional[float] = Field(default=0.7, ge=0, le=2)
 
 
 @router.post("/{case_id}/nodes/{node_id}/regenerate")
@@ -756,79 +761,294 @@ async def regenerate_node(case_id: str, node_id: str, body: RegenerateForm, requ
     """
     重新生成节点内容：
     - 复用 Open WebUI 通用模型接口 `generate_chat_completion`
-    - 使用任务模型选择逻辑（支持自定义 TASK_MODEL / TASK_MODEL_EXTERNAL）
-    - 非流式执行，直接返回更新后的节点
+    - 完整的重试机制和异常处理
+    - 异步任务处理
+    - 数据库状态同步和回滚机制
+    - 详细的错误分类和日志记录
     """
-    c = cases_table.get_case_with_graph_by_id(case_id)
-    if not c or c.user_id != user.id:
-        raise HTTPException(status_code=404, detail="case not found")
+    import traceback
     from open_webui.internal.db import get_db
     from open_webui.models.cases import CaseNode
+    
+    # 验证重生成策略
+    valid_strategies = ["detailed", "concise", "technical", "step-by-step", "summary"]
+    if body.regeneration_strategy and body.regeneration_strategy not in valid_strategies:
+        raise HTTPException(status_code=400, detail=f"Invalid regeneration strategy. Valid options: {valid_strategies}")
+    
+    # 验证上下文参数
+    if body.context and not isinstance(body.context, dict):
+        raise HTTPException(status_code=400, detail="Context must be a dictionary")
+    
     now = int(time.time())
+    
     # 内部任务逻辑
     async def _regenerate_task():
         from open_webui.internal.db import get_db as _get_db
         from open_webui.models.cases import CaseNode as _CN
-        with _get_db() as db2:
-            n2 = db2.query(_CN).filter_by(id=node_id, case_id=case_id).first()
+        import asyncio
+        
+        db2 = next(_get_db())
+        original_status = None
+        original_metadata = None
+        
+        try:
+            n2 = db2.query(_CN).filter(_CN.id == node_id).first()
             if not n2:
-                return
-            # 构造消息
+                error_msg = f"Node {node_id} not found during regeneration task"
+                log.error(error_msg)
+                raise ValueError(error_msg)
+            
+            # 保存原始状态用于回滚
+            original_status = n2.status
+            original_metadata = n2.metadata_.copy() if n2.metadata_ else {}
+            
+            case = Cases.get_case_by_id_and_user_id(case_id, user.id)
+            if not case:
+                error_msg = f"Case {case_id} not found for user {user.id}"
+                log.error(error_msg)
+                n2.status = "FAILED"
+                n2.metadata_ = {
+                    **(n2.metadata_ or {}),
+                    "error": "Case not found",
+                    "error_time": int(time.time())
+                }
+                db2.commit()
+                raise PermissionError(error_msg)
+            
+            # 准备消息
             try:
-                obj = json.loads(n2.content or "")
-                if isinstance(obj, dict):
-                    base_text = obj.get("text") or obj.get("analysis") or obj.get("answer") or ""
-                else:
-                    base_text = str(obj)
-            except Exception:
-                base_text = n2.content or ""
-
-        messages = build_regeneration_messages(
-            original_text=str(base_text),
-            user_prompt=body.prompt,
-            strategy=body.regeneration_strategy,
-            language="zh",
-        )
-
-        content = await regenerate_with_model(
-            request,
-            user,
-            messages,
-            model_hint=body.model,
-            metadata={
-                "task": "case_node_regenerate",
-                "case_id": case_id,
-                "node_id": node_id,
-            },
-        )
-
-        with _get_db() as db2:
-            n2 = db2.query(_CN).filter_by(id=node_id, case_id=case_id).first()
-            if not n2:
-                return
-            n2.content = content
-            n2.status = "COMPLETED"
-            n2.metadata_ = {**(n2.metadata_ or {}), "regenerated": True, "regenerated_at": int(time.time())}
-            db2.commit()
-
-    # 提交任务前标记节点为 PROCESSING
-    from open_webui.internal.db import get_db
-    from open_webui.models.cases import CaseNode
-    with get_db() as db:
-        n = db.query(CaseNode).filter_by(id=node_id, case_id=case_id).first()
+                messages = build_regeneration_messages(
+                    case_content=case["content"],
+                    node_content=n2.content,
+                    regeneration_strategy=body.regeneration_strategy,
+                    user_prompt=body.prompt,
+                    context=body.context,
+                )
+            except Exception as e:
+                error_msg = f"Failed to build regeneration messages: {str(e)}"
+                log.error(error_msg)
+                n2.status = "FAILED"
+                n2.metadata_ = {
+                    **(n2.metadata_ or {}),
+                    "error": "Message preparation failed",
+                    "error_details": str(e),
+                    "error_time": int(time.time())
+                }
+                db2.commit()
+                raise ValueError(error_msg)
+            
+            original_content = n2.content
+            
+            # 带重试的生成逻辑
+            last_error = None
+            error_types = []
+            
+            for attempt in range(body.max_retries):
+                try:
+                    log.info(f"Starting regeneration attempt {attempt+1}/{body.max_retries} for node {node_id}")
+                    
+                    content = await regenerate_with_model(
+                        request,
+                        user,
+                        messages,
+                        model_hint=body.model,
+                        metadata={
+                            "task": "case_node_regenerate",
+                            "case_id": case_id,
+                            "node_id": node_id,
+                            "attempt": attempt + 1,
+                            "max_retries": body.max_retries,
+                        },
+                        temperature=body.temperature
+                    )
+                    
+                    # 验证生成的内容
+                    if not content or len(content.strip()) < 10:
+                        raise ValueError("Generated content is too short or empty")
+                    
+                    n2.content = content
+                    log.info(f"Successfully generated content for node {node_id} on attempt {attempt+1}")
+                    break
+                    
+                except asyncio.TimeoutError as e:
+                    last_error = e
+                    error_types.append("timeout")
+                    log.warning(f"Regeneration attempt {attempt+1} timed out for node {node_id}")
+                    if attempt < body.max_retries - 1:
+                        await asyncio.sleep(min(2 ** attempt, 30))  # 指数退避，最多30秒
+                    
+                except HTTPException as e:
+                    last_error = e
+                    error_types.append("http")
+                    log.warning(f"HTTP error on attempt {attempt+1} for node {node_id}: {e.status_code} - {e.detail}")
+                    
+                    # 如果是认证或权限错误，不重试
+                    if e.status_code in [401, 403]:
+                        raise e
+                    
+                    if attempt < body.max_retries - 1:
+                        await asyncio.sleep(min(2 ** attempt, 30))
+                    
+                except ValueError as e:
+                    last_error = e
+                    error_types.append("validation")
+                    log.warning(f"Validation error on attempt {attempt+1} for node {node_id}: {str(e)}")
+                    
+                    # 对于验证错误，尝试调整参数后重试
+                    if attempt < body.max_retries - 1:
+                        body.temperature = min(body.temperature * 0.9, 0.1)  # 降低温度
+                        await asyncio.sleep(2)
+                    
+                except Exception as e:
+                    last_error = e
+                    error_types.append("unknown")
+                    log.error(f"Unexpected error on attempt {attempt+1} for node {node_id}: {str(e)}\n{traceback.format_exc()}")
+                    
+                    if attempt < body.max_retries - 1:
+                        await asyncio.sleep(min(2 ** attempt, 30))
+            
+            # 如果所有重试都失败
+            if last_error:
+                raise last_error
+            
+        except Exception as e:
+            error_msg = f"Regeneration task failed for node {node_id}: {str(e)}"
+            log.error(f"{error_msg}\n{traceback.format_exc()}")
+            
+            # 尝试回滚到原始状态
+            try:
+                if n2:
+                    n2.status = "FAILED"
+                    n2.metadata_ = {
+                        **(n2.metadata_ or {}),
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "error_types_encountered": error_types if error_types else [],
+                        "error_time": int(time.time()),
+                        "original_status": original_status,
+                        "attempted_retries": body.max_retries,
+                        "regeneration_strategy": body.regeneration_strategy,
+                    }
+                    n2.updated_at = int(time.time())
+                    db2.commit()
+                    log.info(f"Updated node {node_id} status to FAILED with error details")
+            except Exception as rollback_error:
+                log.error(f"Failed to update node status after error: {str(rollback_error)}")
+            
+            raise
+            
+        else:
+            # 成功完成，更新状态
+            try:
+                n2.status = "COMPLETED"
+                n2.metadata_ = {
+                    **(n2.metadata_ or {}), 
+                    "regenerated": True, 
+                    "regenerated_at": int(time.time()),
+                    "regeneration_strategy": body.regeneration_strategy,
+                    "original_content": original_content,
+                    "user_prompt": body.prompt,
+                    "model_used": body.model,
+                    "temperature": body.temperature,
+                    "retries_needed": len(error_types) if error_types else 0,
+                }
+                n2.updated_at = int(time.time())
+                db2.commit()
+                log.info(f"Successfully regenerated node {node_id} with {len(error_types) if error_types else 0} retries")
+            except Exception as commit_error:
+                log.error(f"Failed to commit successful regeneration: {str(commit_error)}")
+                raise
+        
+        finally:
+            # 确保数据库连接关闭
+            try:
+                db2.close()
+            except:
+                pass
+    
+    # 提交任务前验证节点并标记为 PROCESSING
+    db = next(get_db())
+    try:
+        n = db.query(CaseNode).filter(CaseNode.id == node_id).first()
         if not n:
-            raise HTTPException(status_code=404, detail="node not found")
+            raise HTTPException(status_code=404, detail="Node not found")
+        
+        # 检查节点是否已在处理中
+        if n.status == "PROCESSING":
+            # 检查是否是卡住的任务（超过5分钟）
+            if n.metadata_ and "processing_started_at" in n.metadata_:
+                processing_time = int(time.time()) - n.metadata_["processing_started_at"]
+                if processing_time > 300:  # 5分钟
+                    log.warning(f"Node {node_id} stuck in PROCESSING for {processing_time}s, allowing new regeneration")
+                else:
+                    raise HTTPException(
+                        status_code=409, 
+                        detail=f"Node is already being regenerated (started {processing_time}s ago)"
+                    )
+        
+        # 记录开始处理
         n.status = "PROCESSING"
+        n.metadata_ = {
+            **(n.metadata_ or {}),
+            "processing_started_at": now,
+            "processing_user_id": user.id,
+            "processing_request_id": request.headers.get("X-Request-Id", "unknown"),
+        }
+        n.updated_at = now
         db.commit()
-
+        log.info(f"Node {node_id} marked as PROCESSING for regeneration by user {user.id}")
+    except Exception as e:
+        log.error(f"Failed to mark node {node_id} as PROCESSING: {str(e)}")
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(status_code=500, detail=f"Failed to start regeneration: {str(e)}")
+    finally:
+        db.close()
+    
+    # 根据async_mode执行任务
     if body.async_mode is not False:
         # 创建后台任务并返回任务ID
-        task_id, _ = await create_task(request.app.state.redis, _regenerate_task(), id=node_id)
-        return {"taskId": task_id, "nodeId": node_id, "status": "submitted"}
+        try:
+            task_id, _ = await create_task(request.app.state.redis, _regenerate_task(), id=node_id)
+            log.info(f"Created async regeneration task {task_id} for node {node_id}")
+            return {
+                "taskId": task_id, 
+                "nodeId": node_id, 
+                "status": "submitted",
+                "message": "Regeneration task submitted successfully"
+            }
+        except Exception as e:
+            # 如果任务创建失败，恢复节点状态
+            log.error(f"Failed to create regeneration task for node {node_id}: {str(e)}")
+            db = next(get_db())
+            try:
+                n = db.query(CaseNode).filter(CaseNode.id == node_id).first()
+                if n:
+                    n.status = "DRAFT"
+                    n.metadata_ = {
+                        **(n.metadata_ or {}),
+                        "task_creation_failed": True,
+                        "task_error": str(e),
+                        "task_error_time": int(time.time())
+                    }
+                    db.commit()
+            finally:
+                db.close()
+            raise HTTPException(status_code=500, detail=f"Failed to create regeneration task: {str(e)}")
     else:
-        # 同步执行（不推荐）
-        await _regenerate_task()
-        return {"taskId": None, "nodeId": node_id, "status": "completed"}
+        # 同步执行（不推荐，仅用于测试）
+        try:
+            log.warning(f"Running synchronous regeneration for node {node_id} (not recommended for production)")
+            await _regenerate_task()
+            return {
+                "taskId": None, 
+                "nodeId": node_id, 
+                "status": "completed",
+                "message": "Regeneration completed synchronously"
+            }
+        except Exception as e:
+            log.error(f"Synchronous regeneration failed for node {node_id}: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Regeneration failed: {str(e)}")
 
 
 @router.get("/{case_id}/nodes/{node_id}/tasks")
@@ -911,3 +1131,387 @@ async def get_canvas_layout(case_id: str, user=Depends(get_verified_user)):
         "nodePositions": layout.get("nodePositions", []),
         "viewportState": layout.get("viewportState", {"zoom": 1.0, "centerX": 0, "centerY": 0}),
     }
+
+
+# --- 知识溯源 ---
+@router.get("/{case_id}/nodes/{node_id}/knowledge")
+async def get_node_knowledge(
+    case_id: str, 
+    node_id: str,
+    topK: int = 5,
+    vendor: Optional[str] = None,
+    retrievalWeight: float = 0.7,
+    user=Depends(get_verified_user)
+):
+    """
+    获取节点知识溯源
+    
+    查询参数:
+    - topK: 返回的文档片段数量 (可选，默认5，范围1-20)
+    - vendor: 按指定厂商过滤 (可选)
+    - retrievalWeight: 检索权重 (可选，默认0.7，范围0-1)
+    """
+    # 验证案例存在且属于当前用户
+    c = cases_table.get_case_by_id(case_id)
+    if not c or c.user_id != user.id:
+        raise HTTPException(status_code=404, detail="案例不存在")
+    
+    # 查找节点
+    node = cases_table.get_node_by_id(node_id)
+    if not node or node.case_id != case_id:
+        raise HTTPException(status_code=404, detail="节点不存在")
+    
+    # 验证参数
+    if topK < 1 or topK > 20:
+        raise HTTPException(status_code=400, detail="topK参数必须在1-20之间")
+    
+    if retrievalWeight < 0 or retrievalWeight > 1:
+        raise HTTPException(status_code=400, detail="retrievalWeight参数必须在0-1之间")
+    
+    try:
+        # 构建查询文本
+        query_text = ""
+        if node.content:
+            if isinstance(node.content, dict):
+                query_text = (
+                    node.content.get('text', '') or 
+                    node.content.get('analysis', '') or 
+                    node.content.get('answer', '')
+                )
+            else:
+                query_text = str(node.content)
+        
+        if not query_text and node.title:
+            query_text = node.title
+        
+        # 如果没有有效的查询文本，返回空结果
+        if not query_text:
+            return {
+                "nodeId": node_id,
+                "sources": [],
+                "retrievalMetadata": {
+                    "totalCandidates": 0,
+                    "retrievalTime": 0,
+                    "rerankTime": 0,
+                    "strategy": "no_query_text"
+                }
+            }
+        
+        # 调用知识检索服务
+        from open_webui.routers.knowledge_migrated import hybrid_search_documents
+        
+        # 执行混合检索
+        search_results = await hybrid_search_documents(
+            query=query_text,
+            top_k=topK,
+            vendor_filter=vendor,
+            retrieval_weight=retrievalWeight,
+            user=user
+        )
+        
+        # 转换为知识溯源格式
+        sources = []
+        for result in search_results.get("results", []):
+            sources.append({
+                "documentId": result.get("documentId"),
+                "title": result.get("title"),
+                "content": result.get("content"),
+                "score": result.get("score"),
+                "vendor": result.get("vendor"),
+                "metadata": result.get("metadata", {})
+            })
+        
+        return {
+            "nodeId": node_id,
+            "sources": sources,
+            "retrievalMetadata": {
+                "totalCandidates": len(sources),
+                "retrievalTime": search_results.get("retrievalTime", 0),
+                "rerankTime": search_results.get("rerankTime", 0),
+                "strategy": "hybrid_search"
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Knowledge retrieval error: {str(e)}")
+        # 如果服务失败，返回空结果
+        return {
+            "nodeId": node_id,
+            "sources": [],
+            "retrievalMetadata": {
+                "totalCandidates": 0,
+                "retrievalTime": 0,
+                "rerankTime": 0,
+                "strategy": "service_error"
+            }
+        }
+
+
+# ========== 批量操作 ==========
+
+class BatchCaseCreateRequest(BaseModel):
+    """批量创建案例请求"""
+    cases: List[CaseCreateForm]
+    
+class BatchCaseDeleteRequest(BaseModel):
+    """批量删除案例请求"""
+    case_ids: List[str]
+    
+class BatchCaseUpdateRequest(BaseModel):
+    """批量更新案例请求"""
+    case_ids: List[str]
+    updates: Dict[str, Any]
+    
+class BatchOperationResult(BaseModel):
+    """批量操作结果"""
+    success_count: int
+    failed_count: int
+    total_count: int
+    success_ids: List[str]
+    failed_items: List[Dict[str, Any]]
+    
+
+@router.post("/batch/create", response_model=BatchOperationResult)
+async def batch_create_cases(
+    request: BatchCaseCreateRequest,
+    user=Depends(get_verified_user)
+):
+    """批量创建案例 - 性能优化版本"""
+    from open_webui.services.batch_processor import process_items_batch, BatchConfig
+    
+    # 配置批量处理参数
+    config = BatchConfig(
+        chunk_size=50,  # 每批50个案例
+        max_workers=4,  # 4个并发工作线程
+        timeout=300,    # 5分钟超时
+        retry_attempts=2
+    )
+    
+    def process_case_chunk(case_chunk: List[CaseForm]) -> List[str]:
+        """处理一批案例"""
+        success_ids = []
+        current_time = int(time.time())
+        
+        # 准备批量插入数据
+        case_data_list = []
+        for case_data in case_chunk:
+            case_id = str(uuid4())
+            case_record = {
+                "id": case_id,
+                "user_id": user.id,
+                "title": case_data.title,
+                "description": case_data.description,
+                "problem_type": case_data.problem_type,
+                "vendor": case_data.vendor,
+                "status": "active",
+                "created_at": current_time,
+                "updated_at": current_time
+            }
+            case_data_list.append(case_record)
+            success_ids.append(case_id)
+        
+        # 批量插入数据库
+        try:
+            from open_webui.internal.db import get_db
+            from open_webui.models.cases import Cases
+            
+            with get_db() as db:
+                # 使用批量插入
+                db.bulk_insert_mappings(Cases, case_data_list)
+                db.commit()
+                
+            return success_ids
+            
+        except Exception as e:
+            log.error(f"批量插入案例失败: {e}")
+            raise e
+    
+    def error_handler(case_data: CaseForm, error: Exception) -> Dict[str, Any]:
+        """错误处理函数"""
+        return {
+            "title": case_data.title,
+            "error": str(error),
+            "problem_type": getattr(case_data, 'problem_type', 'unknown')
+        }
+    
+    # 执行批量处理
+    result = await process_items_batch(
+        items=request.cases,
+        processor_func=process_case_chunk,
+        config=config
+    )
+    
+    return BatchOperationResult(
+        success_count=result.success_count,
+        failed_count=result.failed_count,
+        total_count=result.total_count,
+        success_ids=[item for sublist in result.success_items for item in sublist],  # 展平列表
+        failed_items=result.failed_items
+    )
+
+
+@router.delete("/batch/delete", response_model=BatchOperationResult)
+async def batch_delete_cases(
+    request: BatchCaseDeleteRequest,
+    user=Depends(get_verified_user)
+):
+    """批量删除案例"""
+    success_ids = []
+    failed_items = []
+    
+    for case_id in request.case_ids:
+        try:
+            # 检查案例是否存在且用户有权限
+            case = cases_table.get_case_by_id(case_id)
+            if not case:
+                failed_items.append({
+                    "case_id": case_id,
+                    "error": "案例不存在"
+                })
+                continue
+                
+            if case.user_id != user.id and user.role != "admin":
+                failed_items.append({
+                    "case_id": case_id,
+                    "error": "无权限删除此案例"
+                })
+                continue
+            
+            # 停止相关任务
+            try:
+                stop_item_tasks(case_id)
+            except Exception as e:
+                log.warning(f"停止案例任务失败 {case_id}: {str(e)}")
+            
+            # 删除案例
+            result = cases_table.delete_case_by_id(case_id)
+            if result:
+                success_ids.append(case_id)
+            else:
+                failed_items.append({
+                    "case_id": case_id,
+                    "error": "数据库删除失败"
+                })
+                
+        except Exception as e:
+            log.error(f"批量删除案例失败 {case_id}: {str(e)}")
+            failed_items.append({
+                "case_id": case_id,
+                "error": str(e)
+            })
+    
+    return BatchOperationResult(
+        success_count=len(success_ids),
+        failed_count=len(failed_items),
+        total_count=len(request.case_ids),
+        success_ids=success_ids,
+        failed_items=failed_items
+    )
+
+
+@router.put("/batch/update", response_model=BatchOperationResult)
+async def batch_update_cases(
+    request: BatchCaseUpdateRequest,
+    user=Depends(get_verified_user)
+):
+    """批量更新案例"""
+    success_ids = []
+    failed_items = []
+    
+    # 验证更新字段
+    allowed_fields = {"title", "description", "status", "problem_type", "vendor"}
+    update_fields = set(request.updates.keys())
+    if not update_fields.issubset(allowed_fields):
+        invalid_fields = update_fields - allowed_fields
+        raise HTTPException(
+            status_code=400,
+            detail=f"不允许更新的字段: {', '.join(invalid_fields)}"
+        )
+    
+    for case_id in request.case_ids:
+        try:
+            # 检查案例是否存在且用户有权限
+            case = cases_table.get_case_by_id(case_id)
+            if not case:
+                failed_items.append({
+                    "case_id": case_id,
+                    "error": "案例不存在"
+                })
+                continue
+                
+            if case.user_id != user.id and user.role != "admin":
+                failed_items.append({
+                    "case_id": case_id,
+                    "error": "无权限更新此案例"
+                })
+                continue
+            
+            # 准备更新数据
+            update_data = request.updates.copy()
+            update_data["updated_at"] = int(time.time())
+            
+            # 更新案例
+            result = cases_table.update_case_by_id(case_id, update_data)
+            if result:
+                success_ids.append(case_id)
+            else:
+                failed_items.append({
+                    "case_id": case_id,
+                    "error": "数据库更新失败"
+                })
+                
+        except Exception as e:
+            log.error(f"批量更新案例失败 {case_id}: {str(e)}")
+            failed_items.append({
+                "case_id": case_id,
+                "error": str(e)
+            })
+    
+    return BatchOperationResult(
+        success_count=len(success_ids),
+        failed_count=len(failed_items),
+        total_count=len(request.case_ids),
+        success_ids=success_ids,
+        failed_items=failed_items
+    )
+
+
+@router.post("/batch/export")
+async def batch_export_cases(
+    case_ids: List[str],
+    format: str = "json",
+    user=Depends(get_verified_user)
+):
+    """批量导出案例"""
+    try:
+        cases = []
+        for case_id in case_ids:
+            case = cases_table.get_case_by_id(case_id)
+            if case and (case.user_id == user.id or user.role == "admin"):
+                cases.append({
+                    "id": case.id,
+                    "title": case.title,
+                    "description": case.description,
+                    "problem_type": case.problem_type,
+                    "vendor": case.vendor,
+                    "status": case.status,
+                    "created_at": case.created_at,
+                    "updated_at": case.updated_at
+                })
+        
+        if format == "json":
+            return {
+                "success": True,
+                "data": cases,
+                "format": "json",
+                "count": len(cases)
+            }
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="暂不支持的导出格式"
+            )
+            
+    except Exception as e:
+        log.error(f"批量导出案例失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

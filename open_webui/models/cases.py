@@ -286,3 +286,6 @@ class CasesTable:
                 page=page,
                 page_size=page_size,
             )
+
+
+Cases = CasesTable()

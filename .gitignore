@@ -28,3 +28,6 @@ Pipfile
 /Scripts
 /share
 .pytest_cache/
+
+# Note: Static files in open_webui/static/ are managed with git update-index --skip-worktree
+# to ignore runtime deletions while preserving them in the repository

@@ -39,7 +39,7 @@ from pydantic import BaseModel
 
 from open_webui.utils.misc import parse_duration, validate_email_format
 from open_webui.services.token_blacklist import token_blacklist
-from open_webui.utils.utils import (
+from open_webui.utils.auth import (
     decode_token,
     create_api_key,
     create_token,

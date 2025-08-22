@@ -15,7 +15,6 @@ import logging
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 import magic
-import yara
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -49,23 +48,6 @@ class SecurityScanner:
         }
         
         self.max_file_size = 100 * 1024 * 1024  # 100MB
-        
-        # 初始化YARA规则（如果可用）
-        self.yara_rules = self._load_yara_rules()
-    
-    def _load_yara_rules(self) -> Optional[yara.Rules]:
-        """加载YARA恶意代码检测规则"""
-        try:
-            rules_path = Path(__file__).parent / "yara_rules"
-            if rules_path.exists():
-                rule_files = list(rules_path.glob("*.yar"))
-                if rule_files:
-                    return yara.compile(filepaths={
-                        f.stem: str(f) for f in rule_files
-                    })
-        except Exception as e:
-            logger.warning(f"无法加载YARA规则: {e}")
-        return None
     
     def scan_file(self, file_path: str, filename: str = None) -> ScanResult:
         """
@@ -104,9 +86,6 @@ class SecurityScanner:
             # 检查文件内容
             content_check = self._check_file_content(file_path)
             
-            # YARA规则扫描（如果可用）
-            yara_check = self._yara_scan(file_path)
-            
             # 综合评估
             threats = []
             risk_level = "low"
@@ -118,7 +97,6 @@ class SecurityScanner:
                 ("extension", extension_check),
                 ("mime", mime_check),
                 ("content", content_check),
-                ("yara", yara_check)
             ]:
                 if not check_result["safe"]:
                     threats.extend(check_result["threats"])
@@ -127,7 +105,7 @@ class SecurityScanner:
                         is_safe = False
                     elif check_result["risk_level"] == "medium" and risk_level == "low":
                         risk_level = "medium"
-                        if check_name in ["extension", "yara"]:
+                        if check_name in ["extension"]:
                             is_safe = False
             
             scan_time = time.time() - start_time
@@ -145,7 +123,6 @@ class SecurityScanner:
                     "extension_check": extension_check,
                     "mime_check": mime_check,
                     "content_check": content_check,
-                    "yara_check": yara_check
                 }
             )
             
@@ -367,40 +344,6 @@ class SecurityScanner:
             logger.warning(f"文本内容检查失败: {e}")
         
         return threats
-    
-    def _yara_scan(self, file_path: Path) -> Dict:
-        """YARA规则扫描"""
-        if not self.yara_rules:
-            return {
-                "safe": True,
-                "risk_level": "low",
-                "threats": []
-            }
-        
-        try:
-            matches = self.yara_rules.match(str(file_path))
-            
-            if matches:
-                threats = [f"YARA规则匹配: {match.rule}" for match in matches]
-                return {
-                    "safe": False,
-                    "risk_level": "high",
-                    "threats": threats
-                }
-            
-            return {
-                "safe": True,
-                "risk_level": "low",
-                "threats": []
-            }
-            
-        except Exception as e:
-            logger.warning(f"YARA扫描失败: {e}")
-            return {
-                "safe": True,
-                "risk_level": "low",
-                "threats": []
-            }
     
     def scan_multiple_files(self, file_paths: List[str]) -> Dict[str, ScanResult]:
         """批量扫描多个文件"""

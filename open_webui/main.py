@@ -63,17 +63,13 @@ from open_webui.socket.main import (
     get_active_user_ids,
 )
 from open_webui.routers import (
-    admin,
-    apps,
     auths,
     auth,
     channels,
     chats,
     notes,
-    chat,
     evaluations,
     folders,
-    onedrive,
     configs,
     files,
     functions,
@@ -90,7 +86,6 @@ from open_webui.routers import (
     utils,
     pipelines,
     retrieval,
-    workspace,
     scim,
     # 迁移的端点模块
     analysis_migrated,
@@ -103,6 +98,10 @@ from open_webui.routers import (
     dev,
     vendor_commands,
     document_summary,
+    openai,
+    ollama,
+    tasks,
+    user_settings,
 )
 
 from open_webui.routers.retrieval import (
@@ -1232,7 +1231,6 @@ app.mount("/ws", socket_app)
 
 
 app.include_router(ollama.router, prefix="/ollama", tags=["ollama"])
-{{ ... }}
 app.include_router(openai.router, prefix="/openai", tags=["openai"])
 
 

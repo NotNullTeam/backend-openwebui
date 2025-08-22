@@ -9,7 +9,7 @@ from pydantic import BaseModel
 import logging
 
 from open_webui.utils.auth import get_verified_user
-from open_webui.models.cases import Cases
+from open_webui.models.cases import Case as Cases
 
 log = logging.getLogger(__name__)
 router = APIRouter()

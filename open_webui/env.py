@@ -245,6 +245,10 @@ if FROM_INIT_PY:
 
 STATIC_DIR = Path(os.getenv("STATIC_DIR", OPEN_WEBUI_DIR / "static"))
 
+# Cache directory for temporary/generated artifacts
+CACHE_DIR = Path(os.getenv("CACHE_DIR", DATA_DIR / "cache")).resolve()
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
 FONTS_DIR = Path(os.getenv("FONTS_DIR", OPEN_WEBUI_DIR / "static" / "fonts"))
 
 FRONTEND_BUILD_DIR = Path(os.getenv("FRONTEND_BUILD_DIR", BASE_DIR / "build")).resolve()
@@ -352,6 +356,14 @@ REDIS_URL = os.environ.get("REDIS_URL", "")
 REDIS_CLUSTER = os.environ.get("REDIS_CLUSTER", "False").lower() == "true"
 
 REDIS_KEY_PREFIX = os.environ.get("REDIS_KEY_PREFIX", "open-webui")
+
+# Backwards/compat variables for modules expecting discrete host/port/password
+REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
+try:
+    REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
+except ValueError:
+    REDIS_PORT = 6379
+REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", "")
 
 REDIS_SENTINEL_HOSTS = os.environ.get("REDIS_SENTINEL_HOSTS", "")
 REDIS_SENTINEL_PORT = os.environ.get("REDIS_SENTINEL_PORT", "26379")

@@ -4,7 +4,7 @@ import uuid
 import json
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict
 from urllib.parse import quote
 
 from fastapi import (

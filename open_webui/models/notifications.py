@@ -32,7 +32,7 @@ class Notification(Base):
     type = Column(String, default="info")  # info, success, warning, error
     priority = Column(Integer, default=0)  # 0=normal, 1=high, 2=urgent
     read = Column(Boolean, default=False, index=True)
-    metadata = Column(Text)  # JSON string for additional data
+    meta = Column(Text)  # JSON string for additional data
     created_at = Column(DateTime, default=func.now())
     read_at = Column(DateTime, nullable=True)
 
@@ -107,7 +107,7 @@ class NotificationsTable:
                     type=type,
                     priority=priority,
                     read=False,
-                    metadata=json.dumps(metadata) if metadata else None,
+                    meta=json.dumps(metadata) if metadata else None,
                     created_at=datetime.utcnow()
                 )
                 
@@ -276,9 +276,9 @@ class NotificationsTable:
             return None
         
         metadata = None
-        if notification.metadata:
+        if notification.meta:
             try:
-                metadata = json.loads(notification.metadata)
+                metadata = json.loads(notification.meta)
             except:
                 metadata = None
         

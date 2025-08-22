@@ -20,7 +20,7 @@ from sqlalchemy import func, desc, and_, or_, distinct
 
 from open_webui.env import SRC_LOG_LEVELS, REDIS_HOST, REDIS_PORT, REDIS_PASSWORD
 from open_webui.utils.auth import get_verified_user
-from open_webui.models.cases import Cases
+from open_webui.models.cases import Case as Cases
 from open_webui.models.knowledge import Knowledges
 from open_webui.models.files import Files
 from open_webui.internal.db import get_db
@@ -34,6 +34,10 @@ from open_webui.config import (
     RAG_OPENAI_API_KEY,
 )
 from open_webui.services.usage_tracker import UsageTracker
+
+# 提前初始化 logger，避免在 Redis 连接失败的异常分支中引用未定义
+log = logging.getLogger(__name__)
+log.setLevel(SRC_LOG_LEVELS["MAIN"])
 
 # Redis连接
 try:
@@ -50,9 +54,6 @@ except Exception as e:
     log.warning(f"Redis not available: {e}. Using in-memory cache.")
     redis_client = None
     REDIS_AVAILABLE = False
-
-log = logging.getLogger(__name__)
-log.setLevel(SRC_LOG_LEVELS["MAIN"])
 
 router = APIRouter()
 

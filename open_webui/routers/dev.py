@@ -19,11 +19,8 @@ from open_webui.models.prompts import PromptModel, Prompts
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.misc import get_last_user_message
 from open_webui.internal.db import get_db
+from open_webui.env import SRC_LOG_LEVELS, ENV, VERSION, WEBUI_AUTH
 from open_webui.config import (
-    SRC_LOG_LEVELS,
-    ENV,
-    VERSION,
-    WEBUI_AUTH,
     DEFAULT_MODELS,
     DEFAULT_PROMPT_SUGGESTIONS
 )

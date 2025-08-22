@@ -7,7 +7,7 @@ from sqlalchemy import func, desc, and_
 
 from open_webui.env import SRC_LOG_LEVELS
 from open_webui.utils.auth import get_verified_user
-from open_webui.models.cases import Cases
+from open_webui.models.cases import Case as Cases
 from open_webui.models.feedbacks import Feedbacks
 from open_webui.models.usage_logs import UsageLogs, KnowledgeUsageLog, SearchLog
 from open_webui.internal.db import get_db

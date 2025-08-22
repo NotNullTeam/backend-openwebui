@@ -84,3 +84,20 @@ class VectorDBBase(ABC):
     def reset(self) -> None:
         """Reset the vector database by removing all collections or those matching a condition."""
         pass
+
+
+# Convenience accessor used across routers/services that expect a factory function
+def get_retrieval_vector_db():
+    """
+    返回当前配置的向量数据库客户端实例。
+
+    兼容现有代码中从 `open_webui.retrieval.vector.main` 导入
+    `get_retrieval_vector_db` 的用法，内部复用工厂创建的单例客户端。
+    """
+    try:
+        # 延迟导入以避免循环依赖
+        from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
+
+        return VECTOR_DB_CLIENT
+    except Exception:
+        return None

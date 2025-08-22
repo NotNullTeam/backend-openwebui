@@ -83,6 +83,7 @@ from open_webui.routers import (
     knowledge_migrated,
     prompts,
     users,
+    user_settings,
     utils,
     pipelines,
     retrieval,
@@ -98,10 +99,13 @@ from open_webui.routers import (
     dev,
     vendor_commands,
     document_summary,
-    openai,
+    # 核心路由
     ollama,
+    openai,
+    openai_compatible,
     tasks,
-    user_settings,
+    monitoring,
+    performance,
 )
 
 from open_webui.routers.retrieval import (

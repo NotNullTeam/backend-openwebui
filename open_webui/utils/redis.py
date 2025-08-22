@@ -181,7 +181,7 @@ def get_redis_connection(
             )
         elif redis_url:
             connection = redis.Redis.from_url(
-                redis_url, decode_responses=decode_responses, socket_connect_timeout=10
+                redis_url, decode_responses=decode_responses
             )
 
     _CONNECTION_CACHE[cache_key] = connection

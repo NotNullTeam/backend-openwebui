@@ -1,21 +1,25 @@
 """Add usage logs tables
 
-Revision ID: add_usage_logs
-Revises: 
-Create Date: 2025-01-21
+Revision ID: b3ac9c78ee5c
+Revises: b1c2d3e4f5a6
+Create Date: 2025-08-22 21:11:51.723942
+
 """
+from typing import Sequence, Union
+
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects import mysql
-
-# revision identifiers
-revision = 'add_usage_logs'
-down_revision = None
-branch_labels = None
-depends_on = None
+import open_webui.internal.db
 
 
-def upgrade():
+# revision identifiers, used by Alembic.
+revision: str = 'b3ac9c78ee5c'
+down_revision: Union[str, None] = 'b1c2d3e4f5a6'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
     # 创建使用日志表
     op.create_table('usage_logs',
         sa.Column('id', sa.String(length=255), nullable=False),
@@ -81,7 +85,7 @@ def upgrade():
     op.create_index('idx_search_session', 'search_logs', ['session_id'], unique=False)
 
 
-def downgrade():
+def downgrade() -> None:
     # 删除搜索日志表
     op.drop_index('idx_search_session', table_name='search_logs')
     op.drop_index('idx_search_created', table_name='search_logs')

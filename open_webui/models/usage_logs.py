@@ -25,7 +25,7 @@ class UsageLog(Base):
     # 详细信息
     query_text = Column(Text, nullable=True)
     response_text = Column(Text, nullable=True)
-    metadata_ = Column("metadata", JSON, nullable=True)  # 额外的元数据
+    extra_data = Column(JSON, nullable=True)  # 额外的元数据
     
     # 性能指标
     response_time = Column(Float, nullable=True)  # 响应时间（秒）
@@ -115,7 +115,7 @@ class UsageLogModel(BaseModel):
     resource_id: Optional[str] = None
     query_text: Optional[str] = None
     response_text: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+    extra_data: Optional[Dict[str, Any]] = None
     response_time: Optional[float] = None
     tokens_used: Optional[int] = None
     relevance_score: Optional[float] = None
@@ -176,7 +176,7 @@ class UsageLogs:
             resource_id=resource_id,
             query_text=kwargs.get('query_text'),
             response_text=kwargs.get('response_text'),
-            metadata_=kwargs.get('metadata'),
+            extra_data=kwargs.get('metadata'),
             response_time=kwargs.get('response_time'),
             tokens_used=kwargs.get('tokens_used'),
             relevance_score=kwargs.get('relevance_score'),

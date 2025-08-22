@@ -20,6 +20,12 @@ class SearchResult(GetResult):
     distances: Optional[List[List[float | int]]]
 
 
+def get_retrieval_vector_db():
+    """Get the vector database client instance."""
+    from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
+    return VECTOR_DB_CLIENT
+
+
 class VectorDBBase(ABC):
     """
     Abstract base class for all vector database backends.

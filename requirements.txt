@@ -96,10 +96,10 @@ azure-ai-documentintelligence==1.0.2
 jieba==0.42.1
 
 # Alibaba Cloud DocMind (Document Intelligence)
-alibabacloud_docmind_api20220711==1.4.7   # 阿里云文档智能API客户端
-alibabacloud_tea_openapi>=0.3.0           # 阿里云OpenAPI核心库
-alibabacloud_credentials>=0.3.0           # 阿里云认证凭据管理
-alibabacloud_tea_util>=0.3.0              # 阿里云通用工具库
+alibabacloud_docmind_api20220711==1.4.7
+alibabacloud_tea_openapi>=0.3.0
+alibabacloud_credentials>=0.3.0
+alibabacloud_tea_util>=0.3.0
 
 pillow==11.3.0
 opencv-python-headless==4.11.0.86

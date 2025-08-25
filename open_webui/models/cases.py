@@ -69,6 +69,8 @@ class CaseModel(BaseModel):
 
 class CaseCreateForm(BaseModel):
     query: str
+    title: Optional[str] = None
+    category: Optional[str] = None
     attachments: Optional[list[dict]] = None
     useLanggraph: Optional[bool] = False
     vendor: Optional[str] = None

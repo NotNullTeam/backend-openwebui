@@ -85,20 +85,22 @@ async def create_case(body: CaseCreateForm, user=Depends(get_verified_user)):
     from open_webui.models.cases import CaseNode, CaseEdge, Case
     now = int(time.time())
 
-    # 允许 body 动态包含 title 字段
-    title = getattr(body, "title", None)
-    if title and len(title) > 200:
+    # 验证 title 长度
+    if body.title and len(body.title) > 200:
         raise HTTPException(status_code=400, detail="title too long (<=200)")
 
     user_node_id = None
     ai_node_id = None
     edge_id = None
     with get_db() as db:
-        # 更新 title（如有）
-        if title:
+        # 更新 title 和 category（如有）
+        if body.title or body.category:
             row = db.query(Case).filter_by(id=case.id).first()
             if row:
-                row.title = title
+                if body.title:
+                    row.title = body.title
+                if body.category:
+                    row.category = body.category
                 row.updated_at = now
                 db.commit()
 
@@ -175,7 +177,7 @@ async def create_case(body: CaseCreateForm, user=Depends(get_verified_user)):
 
     return {
         "caseId": case.id,
-        "title": title or case.title,
+        "title": body.title or case.title,
         "status": case.status,
         "vendor": case.vendor,
         "nodes": nodes_out,

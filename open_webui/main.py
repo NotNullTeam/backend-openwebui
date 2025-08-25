@@ -81,6 +81,7 @@ from open_webui.routers import (
     models,
     knowledge,
     knowledge_migrated,
+    knowledge_unified,
     prompts,
     users,
     user_settings,
@@ -275,6 +276,11 @@ from open_webui.config import (
     PDF_EXTRACT_IMAGES,
     YOUTUBE_LOADER_LANGUAGE,
     YOUTUBE_LOADER_PROXY_URL,
+    # Alibaba IDP (DocMind) options
+    ALIBABA_IDP_ENABLE_LLM,
+    ALIBABA_IDP_ENABLE_FORMULA,
+    ALIBABA_IDP_MAX_CHUNK_SIZE,
+    ALIBABA_IDP_CHUNK_OVERLAP,
     # Retrieval (Web Search)
     ENABLE_WEB_SEARCH,
     WEB_SEARCH_ENGINE,
@@ -862,6 +868,12 @@ app.state.config.RAG_AZURE_OPENAI_API_VERSION = RAG_AZURE_OPENAI_API_VERSION
 app.state.config.RAG_OLLAMA_BASE_URL = RAG_OLLAMA_BASE_URL
 app.state.config.RAG_OLLAMA_API_KEY = RAG_OLLAMA_API_KEY
 
+# Alibaba IDP (DocMind) configuration
+app.state.config.ALIBABA_IDP_ENABLE_LLM = ALIBABA_IDP_ENABLE_LLM
+app.state.config.ALIBABA_IDP_ENABLE_FORMULA = ALIBABA_IDP_ENABLE_FORMULA
+app.state.config.ALIBABA_IDP_MAX_CHUNK_SIZE = ALIBABA_IDP_MAX_CHUNK_SIZE
+app.state.config.ALIBABA_IDP_CHUNK_OVERLAP = ALIBABA_IDP_CHUNK_OVERLAP
+
 app.state.config.PDF_EXTRACT_IMAGES = PDF_EXTRACT_IMAGES
 
 app.state.config.YOUTUBE_LOADER_LANGUAGE = YOUTUBE_LOADER_LANGUAGE
@@ -1259,6 +1271,9 @@ app.include_router(notes.router, prefix="/api/v1/notes", tags=["notes"])
 
 app.include_router(models.router, prefix="/api/v1/models", tags=["models"])
 app.include_router(knowledge.router, prefix="/api/v1/knowledge", tags=["knowledge"])
+# 注册知识库统一API路由（支持版本化）
+app.include_router(knowledge_unified.router, tags=["knowledge_unified"])
+app.include_router(knowledge_unified.router_v1, tags=["knowledge_unified_v1"])
 app.include_router(prompts.router, prefix="/api/v1/prompts", tags=["prompts"])
 app.include_router(tools.router, prefix="/api/v1/tools", tags=["tools"])
 

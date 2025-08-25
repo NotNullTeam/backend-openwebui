@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from fastapi import FastAPI
 
 from open_webui.routers.cases_migrated import router as cases_router
-from open_webui.routers.knowledge_migrated import router as knowledge_router
+from open_webui.routers.knowledge_unified import router_v1 as knowledge_router
 from open_webui.routers.analysis_migrated import router as analysis_router
 
 # 创建测试应用

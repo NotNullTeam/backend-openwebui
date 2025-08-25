@@ -137,7 +137,13 @@ async def verify_tool_servers_config(
         if form_data.auth_type == "bearer":
             token = form_data.key
         elif form_data.auth_type == "session":
-            token = request.state.token.credentials
+            if hasattr(request.state, 'token') and request.state.token:
+                token = request.state.token.credentials
+            else:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Session token not available"
+                )
 
         url = get_tool_server_url(form_data.url, form_data.path)
         return await get_tool_server_data(token, url)

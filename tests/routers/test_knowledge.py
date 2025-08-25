@@ -69,7 +69,7 @@ class TestKnowledgeList:
         with patch("open_webui.routers.knowledge.get_verified_user", return_value=mock_verified_user):
             with patch("open_webui.routers.knowledge.Knowledges.get_knowledge_bases_by_user_id", return_value=[mock_kb]):
                 with patch("open_webui.routers.knowledge.Files.get_file_metadatas_by_ids", return_value=[mock_file]):
-                    response = await async_client.get("/api/v1/knowledge/")
+                    response = await async_client.get("/api/knowledge/collections")
                     assert response.status_code == 200
                     data = response.json()
                     assert isinstance(data, list)
@@ -88,7 +88,7 @@ class TestKnowledgeList:
             with patch("open_webui.routers.knowledge.ENABLE_ADMIN_WORKSPACE_CONTENT_ACCESS", True):
                 with patch("open_webui.routers.knowledge.Knowledges.get_knowledge_bases", return_value=[mock_kb]):
                     with patch("open_webui.routers.knowledge.Files.get_file_metadatas_by_ids", return_value=[]):
-                        response = await async_client.get("/api/v1/knowledge/")
+                        response = await async_client.get("/api/knowledge/collections")
                         assert response.status_code == 200
     
     async def test_get_knowledge_list_success(self, async_client: AsyncClient, mock_verified_user):
@@ -103,7 +103,7 @@ class TestKnowledgeList:
         with patch("open_webui.routers.knowledge.get_verified_user", return_value=mock_verified_user):
             with patch("open_webui.routers.knowledge.Knowledges.get_knowledge_bases_by_user_id", return_value=[mock_kb]):
                 with patch("open_webui.routers.knowledge.Files.get_file_metadatas_by_ids", return_value=[]):
-                    response = await async_client.get("/api/v1/knowledge/list")
+                    response = await async_client.get("/api/knowledge/collections")
                     assert response.status_code == 200
                     assert isinstance(response.json(), list)
 
@@ -126,7 +126,7 @@ class TestKnowledgeCreate:
             with patch("open_webui.routers.knowledge.has_permission", return_value=True):
                 with patch("open_webui.routers.knowledge.Knowledges.insert_new_knowledge", return_value=mock_kb):
                     response = await async_client.post(
-                        "/api/v1/knowledge/create",
+                        "/api/knowledge/collections",
                         json=form_data
                     )
                     assert response.status_code in [200, 201]

@@ -10,10 +10,10 @@ from open_webui.utils.auth import get_verified_user, get_admin_user
 from open_webui.internal.db import get_db
 from open_webui.models.cases import Case, CaseNode, CaseEdge
 from open_webui.models.files import File
-from open_webui.models.knowledge import Knowledge
 from open_webui.models.users import User
 from open_webui.models.chats import Chat
 from open_webui.models.notifications import Notification
+from open_webui.services.knowledge_unified import KnowledgeService
 from open_webui.env import VERSION, CACHE_DIR, DATA_DIR
 
 

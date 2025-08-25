@@ -44,7 +44,7 @@ class TestKnowledgeEndpoints:
         ]
         
         response = client.get(
-            "/api/v1/knowledge/documents",
+            "/api/knowledge/documents",
             headers={"Authorization": "Bearer test-token"}
         )
         
@@ -208,7 +208,7 @@ class TestKnowledgeEndpoints:
         mock_del_vectors.return_value = True
         
         response = client.delete(
-            "/api/v1/knowledge/documents/doc-123",
+            "/api/knowledge/documents/doc-123",
             headers={"Authorization": "Bearer test-token"}
         )
         

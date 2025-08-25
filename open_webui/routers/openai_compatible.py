@@ -19,7 +19,7 @@ import logging
 
 from open_webui.utils.auth import get_verified_user
 from open_webui.services.log_parsing_service import log_parsing_service
-from open_webui.routers.knowledge_migrated import search_knowledge
+from open_webui.services.knowledge_unified import KnowledgeService
 from open_webui.retrieval.vector.main import get_retrieval_vector_db
 
 logger = logging.getLogger(__name__)
@@ -378,37 +378,40 @@ async def execute_knowledge_search_tool(arguments: Dict[str, Any], user) -> Dict
         return {"error": "搜索查询不能为空"}
     
     try:
-        # 获取向量数据库
-        vector_db = get_retrieval_vector_db()
-        if not vector_db:
-            return {"error": "知识库暂时不可用"}
+        # 使用统一的知识服务
+        knowledge_service = KnowledgeService()
         
-        # 构建搜索过滤器
-        filters = {}
+        # 构建搜索请求
+        search_request = {
+            "query": query,
+            "top_k": top_k,
+            "vector_weight": 0.7,
+            "keyword_weight": 0.3,
+            "filters": {}
+        }
+        
         if vendor:
-            filters["vendor"] = vendor
+            search_request["filters"]["vendor"] = vendor
         
         # 执行搜索
-        search_results = vector_db.search(
-            query=query,
-            limit=top_k,
-            filters=filters
-        )
+        search_result = await knowledge_service.search(search_request, user.id)
         
         # 格式化结果
         formatted_results = []
-        for result in search_results:
+        for result in search_result.get("results", []):
+            content = result.get("content", "")
             formatted_results.append({
-                "content": result.get("content", "")[:200] + "..." if len(result.get("content", "")) > 200 else result.get("content", ""),
+                "content": content[:200] + "..." if len(content) > 200 else content,
                 "source": result.get("metadata", {}).get("source", "未知"),
-                "relevance_score": round(result.get("score", 0), 3)
+                "relevance_score": round(result.get("score", 0), 3),
+                "document_id": result.get("id", "")
             })
         
         return {
             "results": formatted_results,
-            "total_found": len(search_results),
+            "total_found": search_result.get("total", 0),
             "query": query,
-            "search_filters": filters
+            "search_filters": search_request["filters"]
         }
         
     except Exception as e:

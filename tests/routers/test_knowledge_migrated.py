@@ -385,7 +385,7 @@ class TestKnowledgeSearchRouter:
             "topK": 5,
             "vendor": "华为"
         }
-        response = client.post("/api/v1/knowledge/search", json=search_data)
+        response = client.post("/api/knowledge/search", json=search_data)
         
         # 验证结果
         assert response.status_code == 200
@@ -406,7 +406,7 @@ class TestKnowledgeSearchRouter:
         
         # 发送请求
         search_data = {"query": "", "topK": 5}
-        response = client.post("/api/v1/knowledge/search", json=search_data)
+        response = client.post("/api/knowledge/search", json=search_data)
         
         # 验证结果
         assert response.status_code == 400
@@ -422,7 +422,7 @@ class TestKnowledgeSearchRouter:
         
         # 发送请求
         search_data = {"query": "网络故障", "topK": 5}
-        response = client.post("/api/v1/knowledge/search", json=search_data)
+        response = client.post("/api/knowledge/search", json=search_data)
         
         # 验证结果
         assert response.status_code == 503
@@ -443,7 +443,7 @@ class TestKnowledgeSearchRouter:
         ]
         
         # 发送请求
-        response = client.get("/api/v1/knowledge/search-suggestions?query=网络")
+        response = client.get("/api/knowledge/search/suggestions?query=网络")
         
         # 验证结果
         assert response.status_code == 200
@@ -467,7 +467,7 @@ class TestKnowledgeSearchRouter:
         ]
         
         # 发送请求
-        response = client.get("/api/v1/knowledge/tags")
+        response = client.get("/api/knowledge/tags")
         
         # 验证结果
         assert response.status_code == 200

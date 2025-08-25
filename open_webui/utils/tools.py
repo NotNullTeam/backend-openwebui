@@ -97,7 +97,11 @@ def get_tools(
                     if auth_type == "bearer":
                         token = tool_server_connection.get("key", "")
                     elif auth_type == "session":
-                        token = request.state.token.credentials
+                        if hasattr(request.state, 'token') and request.state.token:
+                            token = request.state.token.credentials
+                        else:
+                            # Skip session-based tools if no token available
+                            continue
 
                     def make_tool_function(function_name, token, tool_server_data):
                         async def tool_function(**kwargs):

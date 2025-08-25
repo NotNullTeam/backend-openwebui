@@ -81,6 +81,13 @@ async def get_session_user(
 
     auth_header = request.headers.get("Authorization")
     auth_token = get_http_authorization_cred(auth_header)
+    
+    if not auth_token:
+        raise HTTPException(
+            status_code=401,
+            detail=ERROR_MESSAGES.UNAUTHORIZED
+        )
+    
     token = auth_token.credentials
     data = decode_token(token)
 

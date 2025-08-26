@@ -176,7 +176,8 @@ async def create_case(body: CaseCreateForm, user=Depends(get_verified_user)):
         ]
 
     return {
-        "caseId": case.id,
+        "id": case.id,
+        "case_id": case.id,
         "title": body.title or case.title,
         "status": case.status,
         "vendor": case.vendor,
@@ -191,8 +192,8 @@ async def create_case(body: CaseCreateForm, user=Depends(get_verified_user)):
                 "metadata": {},
             }
         ],
-        "createdAt": now,
-        "updatedAt": now,
+        "created_at": now,
+        "updated_at": now,
     }
 
 
@@ -546,11 +547,11 @@ async def get_case_status(case_id: str, user=Depends(get_verified_user)):
     processing = [n.model_dump() for n in c.nodes if n.status == "PROCESSING"]
     awaiting = [n.model_dump() for n in c.nodes if n.status == "AWAITING_USER_INPUT"]
     return {
-        "caseId": c.id,
+        "case_id": c.id,
         "status": c.status,
-        "processingNodes": processing,
-        "awaitingUserInputNodes": awaiting,
-        "updatedAt": c.updated_at,
+        "processing_nodes": processing,
+        "awaiting_user_input_nodes": awaiting,
+        "updated_at": c.updated_at,
     }
 
 
@@ -1082,7 +1083,11 @@ async def get_case_stats(case_id: str, user=Depends(get_verified_user)):
     types: Dict[str, int] = {}
     for n in c.nodes:
         types[n.node_type] = types.get(n.node_type, 0) + 1
-    return {"nodeCount": node_count, "edgeCount": edge_count, "nodeTypeDistribution": types}
+    return {
+        "node_count": node_count,
+        "edge_count": edge_count,
+        "node_type_distribution": types,
+    }
 
 
 # --- 画布布局 保存/获取 ---

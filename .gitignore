@@ -25,6 +25,7 @@ Pipfile
 /python311.*
 /Include
 /Lib
+/Scripts/*.exe
 /.venv/Scripts
 /share
 .pytest_cache/

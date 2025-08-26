@@ -23,12 +23,12 @@ if ! docker info >/dev/null 2>&1; then
         echo "⚠️  无法自动启动Docker Desktop，请手动启动"
         
         echo "等待Docker启动..."
-        for i in {1..30}; do
+        for i in {1..10}; do
             if docker info >/dev/null 2>&1; then
                 echo "✅ Docker已启动"
                 break
             fi
-            echo "等待中... ($i/30)"
+            echo "等待中... ($i/10)"
             sleep 2
         done
         

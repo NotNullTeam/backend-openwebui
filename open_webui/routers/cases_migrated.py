@@ -805,8 +805,9 @@ async def regenerate_node(case_id: str, node_id: str, body: RegenerateForm, requ
             original_status = n2.status
             original_metadata = n2.metadata_.copy() if n2.metadata_ else {}
             
-            case = Cases.get_case_by_id_and_user_id(case_id, user.id)
-            if not case:
+            from open_webui.models.cases import Case as _Case
+            case_row = db2.query(_Case).filter(_Case.id == case_id).first()
+            if not case_row or case_row.user_id != user.id:
                 error_msg = f"Case {case_id} not found for user {user.id}"
                 log.error(error_msg)
                 n2.status = "FAILED"
@@ -820,12 +821,27 @@ async def regenerate_node(case_id: str, node_id: str, body: RegenerateForm, requ
             
             # 准备消息
             try:
+                # 构造 original_text：Case query + 节点内容
+                base_text = ""
+                try:
+                    _obj = json.loads(n2.content or "")
+                    if isinstance(_obj, dict):
+                        base_text = str(_obj.get("text") or _obj.get("analysis") or _obj.get("answer") or "")
+                    else:
+                        base_text = str(_obj)
+                except Exception:
+                    base_text = n2.content or ""
+
+                if getattr(case_row, "query", None):
+                    original_text = f"[Case Query]\n{case_row.query}\n\n[Node Content]\n{base_text}".strip()
+                else:
+                    original_text = base_text
+
                 messages = build_regeneration_messages(
-                    case_content=case["content"],
-                    node_content=n2.content,
-                    regeneration_strategy=body.regeneration_strategy,
+                    original_text=original_text,
                     user_prompt=body.prompt,
-                    context=body.context,
+                    strategy=body.regeneration_strategy,
+                    language="zh",
                 )
             except Exception as e:
                 error_msg = f"Failed to build regeneration messages: {str(e)}"
@@ -1141,8 +1157,8 @@ async def get_canvas_layout(case_id: str, user=Depends(get_verified_user)):
 
 
 # --- 知识溯源 ---
-@router.get("/{case_id}/nodes/{node_id}/knowledge")
-async def get_node_knowledge(
+@router.get("/{case_id}/nodes/{node_id}/knowledge/hybrid")
+async def get_node_knowledge_hybrid(
     case_id: str, 
     node_id: str,
     topK: int = 5,
@@ -1164,7 +1180,10 @@ async def get_node_knowledge(
         raise HTTPException(status_code=404, detail="案例不存在")
     
     # 查找节点
-    node = cases_table.get_node_by_id(node_id)
+    from open_webui.internal.db import get_db as _get_db
+    from open_webui.models.cases import CaseNode as _CN2
+    with _get_db() as _db2:
+        node = _db2.query(_CN2).filter(_CN2.id == node_id, _CN2.case_id == case_id).first()
     if not node or node.case_id != case_id:
         raise HTTPException(status_code=404, detail="节点不存在")
     
@@ -1360,7 +1379,8 @@ async def batch_create_cases(
 @router.delete("/batch/delete", response_model=BatchOperationResult)
 async def batch_delete_cases(
     request: BatchCaseDeleteRequest,
-    user=Depends(get_verified_user)
+    user=Depends(get_verified_user),
+    req: Request = None,
 ):
     """批量删除案例"""
     success_ids = []
@@ -1386,12 +1406,13 @@ async def batch_delete_cases(
             
             # 停止相关任务
             try:
-                stop_item_tasks(case_id)
+                if req is not None:
+                    await stop_item_tasks(req.app.state.redis, case_id)
             except Exception as e:
                 log.warning(f"停止案例任务失败 {case_id}: {str(e)}")
             
             # 删除案例
-            result = cases_table.delete_case_by_id(case_id)
+            result = cases_table.delete_case(case_id)
             if result:
                 success_ids.append(case_id)
             else:
@@ -1458,7 +1479,7 @@ async def batch_update_cases(
             update_data["updated_at"] = int(time.time())
             
             # 更新案例
-            result = cases_table.update_case_by_id(case_id, update_data)
+            result = cases_table.update_case(case_id, update_data)
             if result:
                 success_ids.append(case_id)
             else:
@@ -1498,8 +1519,8 @@ async def batch_export_cases(
                 cases.append({
                     "id": case.id,
                     "title": case.title,
-                    "description": case.description,
-                    "problem_type": case.problem_type,
+                    "query": case.query,
+                    "category": case.category,
                     "vendor": case.vendor,
                     "status": case.status,
                     "created_at": case.created_at,

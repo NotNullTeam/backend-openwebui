@@ -282,9 +282,9 @@ class NodeRegenerationService:
                     metadata = checkpoint["metadata"]
                 else:
                     # 执行重生成
-                    from open_webui.routers.cases_migrated import (
+                    from open_webui.services.ai.regenerate_service import (
                         build_regeneration_messages,
-                        regenerate_with_model
+                        regenerate_with_model,
                     )
                     
                     # 解析原始内容

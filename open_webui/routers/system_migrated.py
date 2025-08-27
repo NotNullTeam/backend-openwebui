@@ -9,6 +9,7 @@ from sqlalchemy import func, text
 from open_webui.utils.auth import get_verified_user, get_admin_user
 from open_webui.internal.db import get_db
 from open_webui.models.cases import Case, CaseNode, CaseEdge
+from open_webui.models.knowledge import Knowledge
 from open_webui.models.files import File
 from open_webui.models.users import User
 from open_webui.models.chats import Chat
@@ -124,21 +125,19 @@ async def statistics(
         notifications_total = db.query(Notification).count()
         
         # 时间范围统计
-        cutoff_date = datetime.utcnow() - timedelta(days=days)
+        cutoff_ts = int(time.time()) - days * 86400
         
         # 近期新增案例
-        recent_cases = db.query(Case).filter(
-            Case.created_at >= cutoff_date
-        ).count()
+        recent_cases = db.query(Case).filter(Case.created_at >= cutoff_ts).count()
         
         # 近期活跃用户
         recent_active_users = db.query(func.count(func.distinct(Chat.user_id))).filter(
-            Chat.created_at >= cutoff_date
+            Chat.created_at >= cutoff_ts
         ).scalar() or 0
         
         # 近期新增知识
         recent_knowledge = db.query(Knowledge).filter(
-            Knowledge.created_at >= cutoff_date
+            Knowledge.created_at >= cutoff_ts
         ).count()
         
         # 未读通知统计
@@ -191,7 +190,7 @@ async def metrics(
         if metric_type in ["all", "performance"]:
             # 性能指标
             avg_response_time = db.query(
-                func.avg(Chat.created_at - Chat.updated_at)
+                func.avg(Chat.updated_at - Chat.created_at)
             ).scalar()
             
             metrics_data["performance"] = {
@@ -225,7 +224,7 @@ async def metrics(
         
         if metric_type in ["all", "errors"]:
             # 错误指标（基于反馈表）
-            from open_webui.models.feedback import Feedback
+            from open_webui.models.feedbacks import Feedback
             
             total_feedback = db.query(Feedback).count()
             negative_feedback = db.query(Feedback).filter(
@@ -248,7 +247,7 @@ async def activity(
     user=Depends(get_verified_user)
 ):
     """获取系统活动日志"""
-    cutoff_time = datetime.utcnow() - timedelta(hours=hours)
+    cutoff_ts = int(time.time()) - hours * 3600
     
     with get_db() as db:
         # 最近的聊天活动
@@ -258,10 +257,8 @@ async def activity(
             Chat.title,
             Chat.created_at
         ).filter(
-            Chat.created_at >= cutoff_time
-        ).order_by(
-            Chat.created_at.desc()
-        ).limit(10).all()
+            Chat.created_at >= cutoff_ts
+        ).order_by(Chat.created_at.desc()).limit(10).all()
         
         # 最近的案例活动
         recent_cases = db.query(
@@ -270,10 +267,8 @@ async def activity(
             Case.created_at,
             Case.updated_at
         ).filter(
-            Case.updated_at >= cutoff_time
-        ).order_by(
-            Case.updated_at.desc()
-        ).limit(10).all()
+            Case.updated_at >= cutoff_ts
+        ).order_by(Case.updated_at.desc()).limit(10).all()
         
         # 最近的知识库更新
         recent_knowledge = db.query(
@@ -282,10 +277,8 @@ async def activity(
             Knowledge.created_at,
             Knowledge.updated_at
         ).filter(
-            Knowledge.updated_at >= cutoff_time
-        ).order_by(
-            Knowledge.updated_at.desc()
-        ).limit(10).all()
+            Knowledge.updated_at >= cutoff_ts
+        ).order_by(Knowledge.updated_at.desc()).limit(10).all()
         
         return {
             "period_hours": hours,
@@ -294,7 +287,7 @@ async def activity(
                     "id": chat.id,
                     "user_id": chat.user_id,
                     "title": chat.title,
-                    "created_at": chat.created_at.isoformat() if chat.created_at else None
+                    "created_at": datetime.utcfromtimestamp(chat.created_at).isoformat() if chat.created_at else None,
                 }
                 for chat in recent_chats
             ],
@@ -302,19 +295,19 @@ async def activity(
                 {
                     "id": case.id,
                     "title": case.title,
-                    "created_at": case.created_at.isoformat() if case.created_at else None,
-                    "updated_at": case.updated_at.isoformat() if case.updated_at else None
+                    "created_at": datetime.utcfromtimestamp(case.created_at).isoformat() if case.created_at else None,
+                    "updated_at": datetime.utcfromtimestamp(case.updated_at).isoformat() if case.updated_at else None,
                 }
                 for case in recent_cases
             ],
             "recent_knowledge": [
                 {
-                    "id": knowledge.id,
-                    "name": knowledge.name,
-                    "created_at": knowledge.created_at.isoformat() if knowledge.created_at else None,
-                    "updated_at": knowledge.updated_at.isoformat() if knowledge.updated_at else None
+                    "id": k.id,
+                    "name": k.name,
+                    "created_at": datetime.utcfromtimestamp(k.created_at).isoformat() if k.created_at else None,
+                    "updated_at": datetime.utcfromtimestamp(k.updated_at).isoformat() if k.updated_at else None,
                 }
-                for knowledge in recent_knowledge
+                for k in recent_knowledge
             ],
             "timestamp": datetime.utcnow().isoformat()
         }

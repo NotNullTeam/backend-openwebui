@@ -555,6 +555,43 @@ async def generate_queries(
         )
 
 
+##############################
+#
+# Background Task Introspection
+#
+##############################
+
+from open_webui import tasks as task_manager  # background task registry
+
+
+def _task_status_entry(tid: str) -> dict:
+    t = task_manager.tasks.get(tid)
+    if not t:
+        return {"task_id": tid, "status": "unknown", "done": False, "cancelled": False}
+    return {
+        "task_id": tid,
+        "status": "done" if t.done() else "running",
+        "done": t.done(),
+        "cancelled": t.cancelled(),
+        "exception": str(t.exception()) if t.done() and not t.cancelled() and t.exception() else None,
+    }
+
+
+@router.get("/{task_id}")
+async def get_task_detail(task_id: str, request: Request, user=Depends(get_verified_user)):
+    """Return basic status for a single task. Distributed setups only reflect local instance tasks."""
+    return _task_status_entry(task_id)
+
+
+@router.get("/detail")
+async def get_tasks_detail(ids: Optional[str] = None, request: Request = None, user=Depends(get_verified_user)):
+    """Return status for comma-separated task ids."""
+    if not ids:
+        return {"tasks": []}
+    id_list = [i.strip() for i in ids.split(",") if i.strip()]
+    return {"tasks": [_task_status_entry(tid) for tid in id_list]}
+
+
 @router.post("/auto/completions")
 async def generate_autocompletion(
     request: Request, form_data: dict, user=Depends(get_verified_user)

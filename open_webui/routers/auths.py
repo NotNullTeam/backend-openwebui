@@ -15,10 +15,9 @@ from open_webui.models.auths import (
     SigninResponse,
     SignupForm,
     UpdatePasswordForm,
-    UpdateProfileForm,
     UserResponse,
 )
-from open_webui.models.users import Users
+from open_webui.models.users import Users, UpdateProfileForm
 from open_webui.models.groups import Groups
 
 from open_webui.constants import ERROR_MESSAGES, WEBHOOK_MESSAGES
@@ -30,6 +29,7 @@ from open_webui.env import (
     WEBUI_AUTH_COOKIE_SAME_SITE,
     WEBUI_AUTH_COOKIE_SECURE,
     WEBUI_AUTH_SIGNOUT_REDIRECT_URL,
+    ENABLE_INITIAL_ADMIN_SIGNUP,
     SRC_LOG_LEVELS,
 )
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -38,7 +38,6 @@ from open_webui.config import OPENID_PROVIDER_URL, ENABLE_OAUTH_SIGNUP, ENABLE_L
 from pydantic import BaseModel
 
 from open_webui.utils.misc import parse_duration, validate_email_format
-from open_webui.services.token_blacklist import token_blacklist
 from open_webui.utils.auth import (
     decode_token,
     create_api_key,
@@ -74,20 +73,19 @@ class SessionUserResponse(Token, UserResponse):
     permissions: Optional[dict] = None
 
 
-@router.get("/", response_model=SessionUserResponse)
+class SessionUserInfoResponse(SessionUserResponse):
+    bio: Optional[str] = None
+    gender: Optional[str] = None
+    date_of_birth: Optional[datetime.date] = None
+
+
+@router.get("/", response_model=SessionUserInfoResponse)
 async def get_session_user(
     request: Request, response: Response, user=Depends(get_current_user)
 ):
 
     auth_header = request.headers.get("Authorization")
     auth_token = get_http_authorization_cred(auth_header)
-    
-    if not auth_token:
-        raise HTTPException(
-            status_code=401,
-            detail=ERROR_MESSAGES.UNAUTHORIZED
-        )
-    
     token = auth_token.credentials
     data = decode_token(token)
 
@@ -129,6 +127,9 @@ async def get_session_user(
         "name": user.name,
         "role": user.role,
         "profile_image_url": user.profile_image_url,
+        "bio": user.bio,
+        "gender": user.gender,
+        "date_of_birth": user.date_of_birth,
         "permissions": user_permissions,
     }
 
@@ -145,7 +146,7 @@ async def update_profile(
     if session_user:
         user = Users.update_user_by_id(
             session_user.id,
-            {"profile_image_url": form_data.profile_image_url, "name": form_data.name},
+            form_data.model_dump(),
         )
         if user:
             return user
@@ -569,9 +570,10 @@ async def signup(request: Request, response: Response, form_data: SignupForm):
             not request.app.state.config.ENABLE_SIGNUP
             or not request.app.state.config.ENABLE_LOGIN_FORM
         ):
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN, detail=ERROR_MESSAGES.ACCESS_PROHIBITED
-            )
+            if has_users or not ENABLE_INITIAL_ADMIN_SIGNUP:
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN, detail=ERROR_MESSAGES.ACCESS_PROHIBITED
+                )
     else:
         if has_users:
             raise HTTPException(
@@ -633,7 +635,7 @@ async def signup(request: Request, response: Response, form_data: SignupForm):
             )
 
             if request.app.state.config.WEBHOOK_URL:
-                post_webhook(
+                await post_webhook(
                     request.app.state.WEBUI_NAME,
                     request.app.state.config.WEBHOOK_URL,
                     WEBHOOK_MESSAGES.USER_SIGNUP(user.name),
@@ -672,20 +674,6 @@ async def signup(request: Request, response: Response, form_data: SignupForm):
 
 @router.get("/signout")
 async def signout(request: Request, response: Response):
-    # Get token from cookie or header
-    token = request.cookies.get("token")
-    
-    if token:
-        try:
-            # Decode token to get expiration time
-            decoded = decode_token(token)
-            if decoded and "exp" in decoded:
-                # Add token to blacklist
-                token_blacklist.add_to_blacklist(token, decoded["exp"])
-                log.info(f"Token added to blacklist for user: {decoded.get('id', 'unknown')}")
-        except Exception as e:
-            log.warning(f"Failed to blacklist token during signout: {e}")
-    
     response.delete_cookie("token")
     response.delete_cookie("oui-session")
 

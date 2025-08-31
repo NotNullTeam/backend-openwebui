@@ -9,8 +9,8 @@ from open_webui.config import BannerModel
 
 from open_webui.utils.tools import (
     get_tool_server_data,
-    get_tool_servers_data,
     get_tool_server_url,
+    set_tool_servers,
 )
 
 
@@ -114,10 +114,7 @@ async def set_tool_servers_config(
     request.app.state.config.TOOL_SERVER_CONNECTIONS = [
         connection.model_dump() for connection in form_data.TOOL_SERVER_CONNECTIONS
     ]
-
-    request.app.state.TOOL_SERVERS = await get_tool_servers_data(
-        request.app.state.config.TOOL_SERVER_CONNECTIONS
-    )
+    await set_tool_servers(request)
 
     return {
         "TOOL_SERVER_CONNECTIONS": request.app.state.config.TOOL_SERVER_CONNECTIONS,
@@ -137,13 +134,7 @@ async def verify_tool_servers_config(
         if form_data.auth_type == "bearer":
             token = form_data.key
         elif form_data.auth_type == "session":
-            if hasattr(request.state, 'token') and request.state.token:
-                token = request.state.token.credentials
-            else:
-                raise HTTPException(
-                    status_code=401,
-                    detail="Session token not available"
-                )
+            token = request.state.token.credentials
 
         url = get_tool_server_url(form_data.url, form_data.path)
         return await get_tool_server_data(token, url)

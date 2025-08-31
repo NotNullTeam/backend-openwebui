@@ -11,4 +11,3 @@ class VectorType(StrEnum):
     PGVECTOR = "pgvector"
     ORACLE23AI = "oracle23ai"
     S3VECTOR = "s3vector"
-    WEAVIATE = "weaviate"

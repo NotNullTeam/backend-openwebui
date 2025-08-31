@@ -48,8 +48,6 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import Response, StreamingResponse
-
-from open_webui.middleware.rate_limiter import RateLimitMiddleware
 from starlette.datastructures import Headers
 
 
@@ -59,54 +57,36 @@ from open_webui.utils.logger import start_logger
 from open_webui.socket.main import (
     app as socket_app,
     periodic_usage_pool_cleanup,
+    get_event_emitter,
     get_models_in_use,
     get_active_user_ids,
 )
 from open_webui.routers import (
+    audio,
+    images,
+    ollama,
+    openai,
+    retrieval,
+    pipelines,
+    tasks,
     auths,
-    auth,
     channels,
     chats,
     notes,
-    evaluations,
     folders,
     configs,
+    groups,
     files,
     functions,
-    groups,
-    images,
     memories,
-    audio,
-    tools,
     models,
     knowledge,
-    knowledge_migrated,
-    knowledge_unified,
     prompts,
+    evaluations,
+    tools,
     users,
-    user_settings,
     utils,
-    pipelines,
-    retrieval,
     scim,
-    # 迁移的端点模块
-    analysis_migrated,
-    cases_migrated,
-    system_migrated,
-    notifications,
-    statistics,
-    settings,
-    search,
-    dev,
-    vendor_commands,
-    document_summary,
-    # 核心路由
-    ollama,
-    openai,
-    openai_compatible,
-    tasks,
-    monitoring,
-    performance,
 )
 
 from open_webui.routers.retrieval import (
@@ -206,6 +186,7 @@ from open_webui.config import (
     FIRECRAWL_API_BASE_URL,
     FIRECRAWL_API_KEY,
     WEB_LOADER_ENGINE,
+    WEB_LOADER_CONCURRENT_REQUESTS,
     WHISPER_MODEL,
     WHISPER_VAD_FILTER,
     WHISPER_LANGUAGE,
@@ -276,11 +257,6 @@ from open_webui.config import (
     PDF_EXTRACT_IMAGES,
     YOUTUBE_LOADER_LANGUAGE,
     YOUTUBE_LOADER_PROXY_URL,
-    # Alibaba IDP (DocMind) options
-    ALIBABA_IDP_ENABLE_LLM,
-    ALIBABA_IDP_ENABLE_FORMULA,
-    ALIBABA_IDP_MAX_CHUNK_SIZE,
-    ALIBABA_IDP_CHUNK_OVERLAP,
     # Retrieval (Web Search)
     ENABLE_WEB_SEARCH,
     WEB_SEARCH_ENGINE,
@@ -353,6 +329,7 @@ from open_webui.config import (
     ENABLE_MESSAGE_RATING,
     ENABLE_USER_WEBHOOKS,
     ENABLE_EVALUATION_ARENA_MODELS,
+    BYPASS_ADMIN_ACCESS_CONTROL,
     USER_PERMISSIONS,
     DEFAULT_USER_ROLE,
     PENDING_USER_OVERLAY_CONTENT,
@@ -401,6 +378,7 @@ from open_webui.config import (
     RESPONSE_WATERMARK,
     # Admin
     ENABLE_ADMIN_CHAT_ACCESS,
+    BYPASS_ADMIN_ACCESS_CONTROL,
     ENABLE_ADMIN_EXPORT,
     # Tasks
     TASK_MODEL,
@@ -489,6 +467,7 @@ from open_webui.utils.redis import get_redis_connection
 from open_webui.tasks import (
     redis_task_command_listener,
     list_task_ids_by_item_id,
+    create_task,
     stop_task,
     list_tasks,
 )  # Import from tasks.py
@@ -868,12 +847,6 @@ app.state.config.RAG_AZURE_OPENAI_API_VERSION = RAG_AZURE_OPENAI_API_VERSION
 app.state.config.RAG_OLLAMA_BASE_URL = RAG_OLLAMA_BASE_URL
 app.state.config.RAG_OLLAMA_API_KEY = RAG_OLLAMA_API_KEY
 
-# Alibaba IDP (DocMind) configuration
-app.state.config.ALIBABA_IDP_ENABLE_LLM = ALIBABA_IDP_ENABLE_LLM
-app.state.config.ALIBABA_IDP_ENABLE_FORMULA = ALIBABA_IDP_ENABLE_FORMULA
-app.state.config.ALIBABA_IDP_MAX_CHUNK_SIZE = ALIBABA_IDP_MAX_CHUNK_SIZE
-app.state.config.ALIBABA_IDP_CHUNK_OVERLAP = ALIBABA_IDP_CHUNK_OVERLAP
-
 app.state.config.PDF_EXTRACT_IMAGES = PDF_EXTRACT_IMAGES
 
 app.state.config.YOUTUBE_LOADER_LANGUAGE = YOUTUBE_LOADER_LANGUAGE
@@ -885,7 +858,10 @@ app.state.config.WEB_SEARCH_ENGINE = WEB_SEARCH_ENGINE
 app.state.config.WEB_SEARCH_DOMAIN_FILTER_LIST = WEB_SEARCH_DOMAIN_FILTER_LIST
 app.state.config.WEB_SEARCH_RESULT_COUNT = WEB_SEARCH_RESULT_COUNT
 app.state.config.WEB_SEARCH_CONCURRENT_REQUESTS = WEB_SEARCH_CONCURRENT_REQUESTS
+
 app.state.config.WEB_LOADER_ENGINE = WEB_LOADER_ENGINE
+app.state.config.WEB_LOADER_CONCURRENT_REQUESTS = WEB_LOADER_CONCURRENT_REQUESTS
+
 app.state.config.WEB_SEARCH_TRUST_ENV = WEB_SEARCH_TRUST_ENV
 app.state.config.BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL = (
     BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL
@@ -948,14 +924,19 @@ try:
         app.state.config.RAG_EMBEDDING_MODEL,
         RAG_EMBEDDING_MODEL_AUTO_UPDATE,
     )
-
-    app.state.rf = get_rf(
-        app.state.config.RAG_RERANKING_ENGINE,
-        app.state.config.RAG_RERANKING_MODEL,
-        app.state.config.RAG_EXTERNAL_RERANKER_URL,
-        app.state.config.RAG_EXTERNAL_RERANKER_API_KEY,
-        RAG_RERANKING_MODEL_AUTO_UPDATE,
-    )
+    if (
+        app.state.config.ENABLE_RAG_HYBRID_SEARCH
+        and not app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL
+    ):
+        app.state.rf = get_rf(
+            app.state.config.RAG_RERANKING_ENGINE,
+            app.state.config.RAG_RERANKING_MODEL,
+            app.state.config.RAG_EXTERNAL_RERANKER_URL,
+            app.state.config.RAG_EXTERNAL_RERANKER_API_KEY,
+            RAG_RERANKING_MODEL_AUTO_UPDATE,
+        )
+    else:
+        app.state.rf = None
 except Exception as e:
     log.error(f"Error updating models: {e}")
     pass
@@ -1226,22 +1207,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Add rate limiting middleware
-rate_limit_config = {
-    "global_limit": 1000,
-    "global_window": 60,
-    "user_limit": 100,
-    "user_window": 60,
-    "ip_limit": 50,
-    "ip_window": 60,
-    "path_limits": {
-        "/api/v1/analysis": {"limit": 10, "window": 60},
-        "/api/v1/knowledge/documents/upload": {"limit": 20, "window": 60},
-        "/api/v1/cases/batch": {"limit": 5, "window": 60},
-    }
-}
-app.add_middleware(RateLimitMiddleware, config=rate_limit_config)
-
 
 app.mount("/ws", socket_app)
 
@@ -1261,7 +1226,6 @@ app.include_router(configs.router, prefix="/api/v1/configs", tags=["configs"])
 
 app.include_router(auths.router, prefix="/api/v1/auths", tags=["auths"])
 app.include_router(users.router, prefix="/api/v1/users", tags=["users"])
-app.include_router(user_settings.router, tags=["user_settings"])
 
 
 app.include_router(channels.router, prefix="/api/v1/channels", tags=["channels"])
@@ -1271,9 +1235,6 @@ app.include_router(notes.router, prefix="/api/v1/notes", tags=["notes"])
 
 app.include_router(models.router, prefix="/api/v1/models", tags=["models"])
 app.include_router(knowledge.router, prefix="/api/v1/knowledge", tags=["knowledge"])
-# 注册知识库统一API路由（支持版本化）
-app.include_router(knowledge_unified.router, tags=["knowledge_unified"])
-app.include_router(knowledge_unified.router_v1, tags=["knowledge_unified_v1"])
 app.include_router(prompts.router, prefix="/api/v1/prompts", tags=["prompts"])
 app.include_router(tools.router, prefix="/api/v1/tools", tags=["tools"])
 
@@ -1286,28 +1247,6 @@ app.include_router(
     evaluations.router, prefix="/api/v1/evaluations", tags=["evaluations"]
 )
 app.include_router(utils.router, prefix="/api/v1/utils", tags=["utils"])
-
-# Migrated endpoints (initial skeleton)
-app.include_router(analysis_migrated.router, prefix="/api/v1/analysis", tags=["analysis"])
-app.include_router(cases_migrated.router, prefix="/api/v1/cases", tags=["cases"])
-app.include_router(system_migrated.router, prefix="/api/v1/system", tags=["system"])
-app.include_router(statistics.router, prefix="/api/v1/statistics", tags=["statistics"])
-app.include_router(settings.router, prefix="/api/v1/settings", tags=["settings"])
-app.include_router(search.router, prefix="/api/v1/search", tags=["search"])
-
-# New authentication and notification endpoints
-app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
-app.include_router(notifications.router, prefix="/api/v1", tags=["notifications"])
-
-# Development debug module
-app.include_router(dev.router, prefix="/api/v1/dev", tags=["development"])
-
-# New critical endpoints for missing features
-app.include_router(vendor_commands.router, prefix="/api/v1/vendor", tags=["vendor_commands"])
-app.include_router(document_summary.router, prefix="/api/v1", tags=["document_summary"])
-
-# Knowledge management migrated endpoints
-app.include_router(knowledge_migrated.router, prefix="/api/v1/knowledge", tags=["knowledge_migrated"])
 
 # SCIM 2.0 API for identity management
 if SCIM_ENABLED:
@@ -1355,8 +1294,12 @@ async def get_models(
 
             model_info = Models.get_model_by_id(model["id"])
             if model_info:
-                if user.id == model_info.user_id or has_access(
-                    user.id, type="read", access_control=model_info.access_control
+                if (
+                    (user.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL)
+                    or user.id == model_info.user_id
+                    or has_access(
+                        user.id, type="read", access_control=model_info.access_control
+                    )
                 ):
                     filtered_models.append(model)
 
@@ -1391,11 +1334,17 @@ async def get_models(
         model_order_dict = {model_id: i for i, model_id in enumerate(model_order_list)}
         # Sort models by order list priority, with fallback for those not in the list
         models.sort(
-            key=lambda x: (model_order_dict.get(x["id"], float("inf")), x["name"])
+            key=lambda model: (
+                model_order_dict.get(model.get("id", ""), float("inf")),
+                (model.get("name", "") or ""),
+            )
         )
 
     # Filter out models that the user does not have access to
-    if user.role == "user" and not BYPASS_MODEL_ACCESS_CONTROL:
+    if (
+        user.role == "user"
+        or (user.role == "admin" and not BYPASS_ADMIN_ACCESS_CONTROL)
+    ) and not BYPASS_MODEL_ACCESS_CONTROL:
         models = get_filtered_models(models, user)
 
     log.debug(
@@ -1466,7 +1415,9 @@ async def chat_completion(
             model_info = Models.get_model_by_id(model_id)
 
             # Check if user has access to the model
-            if not BYPASS_MODEL_ACCESS_CONTROL and user.role == "user":
+            if not BYPASS_MODEL_ACCESS_CONTROL and (
+                user.role != "admin" or not BYPASS_ADMIN_ACCESS_CONTROL
+            ):
                 try:
                     check_model_access(user, model)
                 except Exception as e:
@@ -1486,10 +1437,14 @@ async def chat_completion(
         stream_delta_chunk_size = form_data.get("params", {}).get(
             "stream_delta_chunk_size"
         )
+        reasoning_tags = form_data.get("params", {}).get("reasoning_tags")
 
         # Model Params
         if model_info_params.get("stream_delta_chunk_size"):
             stream_delta_chunk_size = model_info_params.get("stream_delta_chunk_size")
+
+        if model_info_params.get("reasoning_tags") is not None:
+            reasoning_tags = model_info_params.get("reasoning_tags")
 
         metadata = {
             "user_id": user.id,
@@ -1506,6 +1461,7 @@ async def chat_completion(
             "direct": model_item.get("direct", False),
             "params": {
                 "stream_delta_chunk_size": stream_delta_chunk_size,
+                "reasoning_tags": reasoning_tags,
                 "function_calling": (
                     "native"
                     if (
@@ -1518,66 +1474,89 @@ async def chat_completion(
         }
 
         if metadata.get("chat_id") and (user and user.role != "admin"):
-            chat = Chats.get_chat_by_id_and_user_id(metadata["chat_id"], user.id)
-            if chat is None:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=ERROR_MESSAGES.DEFAULT(),
-                )
+            if metadata["chat_id"] != "local":
+                chat = Chats.get_chat_by_id_and_user_id(metadata["chat_id"], user.id)
+                if chat is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=ERROR_MESSAGES.DEFAULT(),
+                    )
 
         request.state.metadata = metadata
         form_data["metadata"] = metadata
 
-        form_data, metadata, events = await process_chat_payload(
-            request, form_data, user, metadata, model
-        )
     except Exception as e:
-        log.debug(f"Error processing chat payload: {e}")
-        if metadata.get("chat_id") and metadata.get("message_id"):
-            # Update the chat message with the error
-            Chats.upsert_message_to_chat_by_id_and_message_id(
-                metadata["chat_id"],
-                metadata["message_id"],
-                {
-                    "error": {"content": str(e)},
-                },
-            )
-
+        log.debug(f"Error processing chat metadata: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
 
-    try:
-        response = await chat_completion_handler(request, form_data, user)
-        if metadata.get("chat_id") and metadata.get("message_id"):
-            Chats.upsert_message_to_chat_by_id_and_message_id(
-                metadata["chat_id"],
-                metadata["message_id"],
-                {
-                    "model": model_id,
-                },
+    async def process_chat(request, form_data, user, metadata, model):
+        try:
+            form_data, metadata, events = await process_chat_payload(
+                request, form_data, user, metadata, model
             )
 
-        return await process_chat_response(
-            request, response, form_data, user, metadata, model, events, tasks
-        )
-    except Exception as e:
-        log.debug(f"Error in chat completion: {e}")
-        if metadata.get("chat_id") and metadata.get("message_id"):
-            # Update the chat message with the error
-            Chats.upsert_message_to_chat_by_id_and_message_id(
-                metadata["chat_id"],
-                metadata["message_id"],
-                {
-                    "error": {"content": str(e)},
-                },
+            response = await chat_completion_handler(request, form_data, user)
+            if metadata.get("chat_id") and metadata.get("message_id"):
+                try:
+                    Chats.upsert_message_to_chat_by_id_and_message_id(
+                        metadata["chat_id"],
+                        metadata["message_id"],
+                        {
+                            "model": model_id,
+                        },
+                    )
+                except:
+                    pass
+
+            return await process_chat_response(
+                request, response, form_data, user, metadata, model, events, tasks
+            )
+        except asyncio.CancelledError:
+            log.info("Chat processing was cancelled")
+            try:
+                event_emitter = get_event_emitter(metadata)
+                await event_emitter(
+                    {"type": "task-cancelled"},
+                )
+            except Exception as e:
+                pass
+        except Exception as e:
+            log.debug(f"Error processing chat payload: {e}")
+            if metadata.get("chat_id") and metadata.get("message_id"):
+                # Update the chat message with the error
+                try:
+                    Chats.upsert_message_to_chat_by_id_and_message_id(
+                        metadata["chat_id"],
+                        metadata["message_id"],
+                        {
+                            "error": {"content": str(e)},
+                        },
+                    )
+                except:
+                    pass
+
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e),
             )
 
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+    if (
+        metadata.get("session_id")
+        and metadata.get("chat_id")
+        and metadata.get("message_id")
+    ):
+        # Asynchronous Chat Processing
+        task_id, _ = await create_task(
+            request.app.state.redis,
+            process_chat(request, form_data, user, metadata, model),
+            id=metadata["chat_id"],
         )
+        return {"status": True, "task_id": task_id}
+    else:
+        return await process_chat(request, form_data, user, metadata, model)
 
 
 # Alias for chat_completion (Legacy)
@@ -1780,6 +1759,16 @@ async def get_app_config(request: Request):
             else {
                 **(
                     {
+                        "ui": {
+                            "pending_user_overlay_title": app.state.config.PENDING_USER_OVERLAY_TITLE,
+                            "pending_user_overlay_content": app.state.config.PENDING_USER_OVERLAY_CONTENT,
+                        }
+                    }
+                    if user and user.role == "pending"
+                    else {}
+                ),
+                **(
+                    {
                         "metadata": {
                             "login_footer": app.state.LICENSE_METADATA.get(
                                 "login_footer", ""
@@ -1791,7 +1780,7 @@ async def get_app_config(request: Request):
                     }
                     if app.state.LICENSE_METADATA
                     else {}
-                )
+                ),
             }
         ),
     }

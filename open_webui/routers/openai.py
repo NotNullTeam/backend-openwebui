@@ -5,6 +5,7 @@ import logging
 from typing import Optional
 
 import aiohttp
+import aiofiles
 from aiocache import cached
 import requests
 from urllib.parse import quote
@@ -30,16 +31,18 @@ from open_webui.env import (
     AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST,
     ENABLE_FORWARD_USER_INFO_HEADERS,
     BYPASS_MODEL_ACCESS_CONTROL,
+    OPENAI_FORCE_IPV4,
 )
 from open_webui.models.users import UserModel
 
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.env import SRC_LOG_LEVELS
+from open_webui.utils.network import create_session
 
 
 from open_webui.utils.payload import (
     apply_model_params_to_body_openai,
-    apply_model_system_prompt_to_body,
+    apply_system_prompt_to_body,
 )
 from open_webui.utils.misc import (
     convert_logit_bias_input_to_json,
@@ -63,7 +66,9 @@ log.setLevel(SRC_LOG_LEVELS["OPENAI"])
 async def send_get_request(url, key=None, user: UserModel = None):
     timeout = aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST)
     try:
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+        async with create_session(
+            force_ipv4=OPENAI_FORCE_IPV4, timeout=timeout, trust_env=True
+        ) as session:
             async with session.get(
                 url,
                 headers={
@@ -213,43 +218,47 @@ async def speech(request: Request, user=Depends(get_verified_user)):
 
         r = None
         try:
-            r = requests.post(
-                url=f"{url}/audio/speech",
-                data=body,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {request.app.state.config.OPENAI_API_KEYS[idx]}",
-                    **(
-                        {
-                            "HTTP-Referer": "https://openwebui.com/",
-                            "X-Title": "Open WebUI",
-                        }
-                        if "openrouter.ai" in url
-                        else {}
-                    ),
-                    **(
-                        {
-                            "X-OpenWebUI-User-Name": quote(user.name, safe=" "),
-                            "X-OpenWebUI-User-Id": user.id,
-                            "X-OpenWebUI-User-Email": user.email,
-                            "X-OpenWebUI-User-Role": user.role,
-                        }
-                        if ENABLE_FORWARD_USER_INFO_HEADERS
-                        else {}
-                    ),
-                },
-                stream=True,
-            )
+            async with create_session(
+                force_ipv4=OPENAI_FORCE_IPV4,
+                timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT),
+                trust_env=True,
+            ) as session:
+                async with session.post(
+                    url=f"{url}/audio/speech",
+                    data=body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {request.app.state.config.OPENAI_API_KEYS[idx]}",
+                        **(
+                            {
+                                "HTTP-Referer": "https://openwebui.com/",
+                                "X-Title": "Open WebUI",
+                            }
+                            if "openrouter.ai" in url
+                            else {}
+                        ),
+                        **(
+                            {
+                                "X-OpenWebUI-User-Name": quote(user.name, safe=" "),
+                                "X-OpenWebUI-User-Id": user.id,
+                                "X-OpenWebUI-User-Email": user.email,
+                                "X-OpenWebUI-User-Role": user.role,
+                            }
+                            if ENABLE_FORWARD_USER_INFO_HEADERS
+                            else {}
+                        ),
+                    },
+                    ssl=AIOHTTP_CLIENT_SESSION_SSL,
+                ) as r:
+                    r.raise_for_status()
 
-            r.raise_for_status()
+                    # Save the streaming content to a file
+                    async with aiofiles.open(file_path, "wb") as f:
+                        async for chunk in r.content.iter_chunked(8192):
+                            await f.write(chunk)
 
-            # Save the streaming content to a file
-            with open(file_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-
-            with open(file_body_path, "w") as f:
-                json.dump(json.loads(body.decode("utf-8")), f)
+            async with aiofiles.open(file_body_path, "w") as f:
+                await f.write(json.dumps(json.loads(body.decode("utf-8"))))
 
             # Return the saved file
             return FileResponse(file_path)
@@ -258,16 +267,18 @@ async def speech(request: Request, user=Depends(get_verified_user)):
             log.exception(e)
 
             detail = None
+            status_code = 500
             if r is not None:
                 try:
-                    res = r.json()
+                    res = await r.json()
                     if "error" in res:
                         detail = f"External: {res['error']}"
+                    status_code = r.status
                 except Exception:
                     detail = f"External: {e}"
 
             raise HTTPException(
-                status_code=r.status_code if r else 500,
+                status_code=status_code,
                 detail=detail if detail else "Open WebUI: Server Connection Error",
             )
 
@@ -361,9 +372,18 @@ async def get_all_models_responses(request: Request, user: UserModel) -> list:
             prefix_id = api_config.get("prefix_id", None)
             tags = api_config.get("tags", [])
 
-            for model in (
+            model_list = (
                 response if isinstance(response, list) else response.get("data", [])
-            ):
+            )
+            if not isinstance(model_list, list):
+                # Catch non-list responses
+                model_list = []
+
+            for model in model_list:
+                # Remove name key if its value is None #16689
+                if "name" in model and model["name"] is None:
+                    del model["name"]
+
                 if prefix_id:
                     model["id"] = (
                         f"{prefix_id}.{model.get('id', model.get('name', ''))}"
@@ -475,7 +495,8 @@ async def get_models(
         )
 
         r = None
-        async with aiohttp.ClientSession(
+        async with create_session(
+            force_ipv4=OPENAI_FORCE_IPV4,
             trust_env=True,
             timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST),
         ) as session:
@@ -570,7 +591,8 @@ async def verify_connection(
 
     api_config = form_data.config or {}
 
-    async with aiohttp.ClientSession(
+    async with create_session(
+        force_ipv4=OPENAI_FORCE_IPV4,
         trust_env=True,
         timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST),
     ) as session:
@@ -693,6 +715,10 @@ def get_azure_allowed_params(api_version: str) -> set[str]:
     return allowed_params
 
 
+def is_openai_reasoning_model(model: str) -> bool:
+    return model.lower().startswith(("o1", "o3", "o4", "gpt-5"))
+
+
 def convert_to_azure_payload(url, payload: dict, api_version: str):
     model = payload.get("model", "")
 
@@ -700,7 +726,7 @@ def convert_to_azure_payload(url, payload: dict, api_version: str):
     allowed_params = get_azure_allowed_params(api_version)
 
     # Special handling for o-series models
-    if model.startswith("o") and model.endswith("-mini"):
+    if is_openai_reasoning_model(model):
         # Convert max_tokens to max_completion_tokens for o-series models
         if "max_tokens" in payload:
             payload["max_completion_tokens"] = payload["max_tokens"]
@@ -750,7 +776,7 @@ async def generate_chat_completion(
             system = params.pop("system", None)
 
             payload = apply_model_params_to_body_openai(params, payload)
-            payload = apply_model_system_prompt_to_body(system, payload, metadata, user)
+            payload = apply_system_prompt_to_body(system, payload, metadata, user)
 
         # Check if user has access to the model
         if not bypass_filter and user.role == "user":
@@ -806,10 +832,7 @@ async def generate_chat_completion(
     key = request.app.state.config.OPENAI_API_KEYS[idx]
 
     # Check if model is a reasoning model that needs special handling
-    is_reasoning_model = (
-        payload["model"].lower().startswith(("o1", "o3", "o4", "gpt-5"))
-    )
-    if is_reasoning_model:
+    if is_openai_reasoning_model(payload["model"]):
         payload = openai_reasoning_model_handler(payload)
     elif "api.openai.com" not in url:
         # Remove "max_completion_tokens" from the payload for backward compatibility
@@ -871,8 +894,10 @@ async def generate_chat_completion(
     response = None
 
     try:
-        session = aiohttp.ClientSession(
-            trust_env=True, timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
+        session = create_session(
+            force_ipv4=OPENAI_FORCE_IPV4,
+            trust_env=True,
+            timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT),
         )
 
         r = await session.request(
@@ -947,7 +972,7 @@ async def embeddings(request: Request, form_data: dict, user):
     session = None
     streaming = False
     try:
-        session = aiohttp.ClientSession(trust_env=True)
+        session = create_session(force_ipv4=OPENAI_FORCE_IPV4, trust_env=True)
         r = await session.request(
             method="POST",
             url=f"{url}/embeddings",
@@ -1055,7 +1080,7 @@ async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
             headers["Authorization"] = f"Bearer {key}"
             request_url = f"{url}/{path}"
 
-        session = aiohttp.ClientSession(trust_env=True)
+        session = create_session(force_ipv4=OPENAI_FORCE_IPV4, trust_env=True)
         r = await session.request(
             method=request.method,
             url=request_url,

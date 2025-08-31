@@ -14,6 +14,7 @@ from fnmatch import fnmatch
 import aiohttp
 import aiofiles
 import requests
+import httpx
 import mimetypes
 from urllib.parse import quote
 
@@ -34,6 +35,7 @@ from pydantic import BaseModel
 
 
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.network import create_session
 from open_webui.config import (
     WHISPER_MODEL_AUTO_UPDATE,
     WHISPER_MODEL_DIR,
@@ -49,6 +51,7 @@ from open_webui.env import (
     SRC_LOG_LEVELS,
     DEVICE_TYPE,
     ENABLE_FORWARD_USER_INFO_HEADERS,
+    OPENAI_FORCE_IPV4,
 )
 
 
@@ -334,8 +337,8 @@ async def speech(request: Request, user=Depends(get_verified_user)):
 
         try:
             timeout = aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
-            async with aiohttp.ClientSession(
-                timeout=timeout, trust_env=True
+            async with create_session(
+                force_ipv4=OPENAI_FORCE_IPV4, timeout=timeout, trust_env=True
             ) as session:
                 r = await session.post(
                     url=f"{request.app.state.config.TTS_OPENAI_API_BASE_URL}/audio/speech",
@@ -550,6 +553,11 @@ def transcription_handler(request, file_path, metadata):
 
     metadata = metadata or {}
 
+    languages = [
+        metadata.get("language", None) if WHISPER_LANGUAGE == "" else WHISPER_LANGUAGE,
+        None,  # Always fallback to None in case transcription fails
+    ]
+
     if request.app.state.config.STT_ENGINE == "":
         if request.app.state.faster_whisper_model is None:
             request.app.state.faster_whisper_model = set_faster_whisper_model(
@@ -561,11 +569,7 @@ def transcription_handler(request, file_path, metadata):
             file_path,
             beam_size=5,
             vad_filter=request.app.state.config.WHISPER_VAD_FILTER,
-            language=(
-                metadata.get("language", None)
-                if WHISPER_LANGUAGE == ""
-                else WHISPER_LANGUAGE
-            ),
+            language=languages[0],
         )
         log.info(
             "Detected language '%s' with probability %f"
@@ -585,21 +589,31 @@ def transcription_handler(request, file_path, metadata):
     elif request.app.state.config.STT_ENGINE == "openai":
         r = None
         try:
-            r = requests.post(
-                url=f"{request.app.state.config.STT_OPENAI_API_BASE_URL}/audio/transcriptions",
-                headers={
-                    "Authorization": f"Bearer {request.app.state.config.STT_OPENAI_API_KEY}"
-                },
-                files={"file": (filename, open(file_path, "rb"))},
-                data={
+            for language in languages:
+                payload = {
                     "model": request.app.state.config.STT_MODEL,
-                    **(
-                        {"language": metadata.get("language")}
-                        if metadata.get("language")
-                        else {}
-                    ),
-                },
-            )
+                }
+
+                if language:
+                    payload["language"] = language
+
+                # Use httpx to optionally force IPv4 for this sync call
+                transport = (
+                    httpx.HTTPTransport(local_address="0.0.0.0") if OPENAI_FORCE_IPV4 else None
+                )
+                with httpx.Client(transport=transport, timeout=None, trust_env=True) as client:
+                    r = client.post(
+                        url=f"{request.app.state.config.STT_OPENAI_API_BASE_URL}/audio/transcriptions",
+                        headers={
+                            "Authorization": f"Bearer {request.app.state.config.STT_OPENAI_API_KEY}"
+                        },
+                        files={"file": (filename, open(file_path, "rb"))},
+                        data=payload,
+                    )
+
+                if r.status_code == 200:
+                    # Successful transcription
+                    break
 
             r.raise_for_status()
             data = r.json()
@@ -641,18 +655,26 @@ def transcription_handler(request, file_path, metadata):
                 "Content-Type": mime,
             }
 
-            # Add model if specified
-            params = {}
-            if request.app.state.config.STT_MODEL:
-                params["model"] = request.app.state.config.STT_MODEL
+            for language in languages:
+                params = {}
+                if request.app.state.config.STT_MODEL:
+                    params["model"] = request.app.state.config.STT_MODEL
 
-            # Make request to Deepgram API
-            r = requests.post(
-                "https://api.deepgram.com/v1/listen?smart_format=true",
-                headers=headers,
-                params=params,
-                data=file_data,
-            )
+                if language:
+                    params["language"] = language
+
+                # Make request to Deepgram API
+                r = requests.post(
+                    "https://api.deepgram.com/v1/listen?smart_format=true",
+                    headers=headers,
+                    params=params,
+                    data=file_data,
+                )
+
+                if r.status_code == 200:
+                    # Successful transcription
+                    break
+
             r.raise_for_status()
             response_data = r.json()
 
@@ -1000,11 +1022,15 @@ def get_available_models(request: Request) -> list[dict]:
             "https://api.openai.com"
         ):
             try:
-                response = requests.get(
-                    f"{request.app.state.config.TTS_OPENAI_API_BASE_URL}/audio/models"
+                transport = (
+                    httpx.HTTPTransport(local_address="0.0.0.0") if OPENAI_FORCE_IPV4 else None
                 )
-                response.raise_for_status()
-                data = response.json()
+                with httpx.Client(transport=transport, timeout=5.0, trust_env=True) as client:
+                    response = client.get(
+                        f"{request.app.state.config.TTS_OPENAI_API_BASE_URL}/audio/models"
+                    )
+                    response.raise_for_status()
+                    data = response.json()
                 available_models = data.get("models", [])
             except Exception as e:
                 log.error(f"Error fetching models from custom endpoint: {str(e)}")
@@ -1046,11 +1072,15 @@ def get_available_voices(request) -> dict:
             "https://api.openai.com"
         ):
             try:
-                response = requests.get(
-                    f"{request.app.state.config.TTS_OPENAI_API_BASE_URL}/audio/voices"
+                transport = (
+                    httpx.HTTPTransport(local_address="0.0.0.0") if OPENAI_FORCE_IPV4 else None
                 )
-                response.raise_for_status()
-                data = response.json()
+                with httpx.Client(transport=transport, timeout=5.0, trust_env=True) as client:
+                    response = client.get(
+                        f"{request.app.state.config.TTS_OPENAI_API_BASE_URL}/audio/voices"
+                    )
+                    response.raise_for_status()
+                    data = response.json()
                 voices_list = data.get("voices", [])
                 available_voices = {voice["id"]: voice["name"] for voice in voices_list}
             except Exception as e:

@@ -17,14 +17,17 @@ from open_webui.constants import ERROR_MESSAGES
 # Load .env file
 ####################################
 
-OPEN_WEBUI_DIR = Path(__file__).parent  # the path containing this file
-print(OPEN_WEBUI_DIR)
+# Use .resolve() to get the canonical path, removing any '..' or '.' components
+ENV_FILE_PATH = Path(__file__).resolve()
 
-BACKEND_DIR = OPEN_WEBUI_DIR.parent  # the path containing this file
-BASE_DIR = BACKEND_DIR.parent  # the path containing the backend/
+# OPEN_WEBUI_DIR should be the directory where env.py resides (open_webui/)
+OPEN_WEBUI_DIR = ENV_FILE_PATH.parent
 
-print(BACKEND_DIR)
-print(BASE_DIR)
+# BACKEND_DIR is the parent of OPEN_WEBUI_DIR (backend/)
+BACKEND_DIR = OPEN_WEBUI_DIR.parent
+
+# BASE_DIR is the parent of BACKEND_DIR (open-webui-dev/)
+BASE_DIR = BACKEND_DIR.parent
 
 try:
     from dotenv import find_dotenv, load_dotenv
@@ -220,8 +223,6 @@ WEBUI_BUILD_HASH = os.environ.get("WEBUI_BUILD_HASH", "dev-build")
 ####################################
 
 DATA_DIR = Path(os.getenv("DATA_DIR", BACKEND_DIR / "data")).resolve()
-CACHE_DIR = Path(os.getenv("CACHE_DIR", DATA_DIR / "cache")).resolve()
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 if FROM_INIT_PY:
     NEW_DATA_DIR = Path(os.getenv("DATA_DIR", OPEN_WEBUI_DIR / "data")).resolve()
@@ -246,10 +247,6 @@ if FROM_INIT_PY:
     DATA_DIR = Path(os.getenv("DATA_DIR", OPEN_WEBUI_DIR / "data"))
 
 STATIC_DIR = Path(os.getenv("STATIC_DIR", OPEN_WEBUI_DIR / "static"))
-
-# Cache directory for temporary/generated artifacts
-CACHE_DIR = Path(os.getenv("CACHE_DIR", DATA_DIR / "cache")).resolve()
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 FONTS_DIR = Path(os.getenv("FONTS_DIR", OPEN_WEBUI_DIR / "static" / "fonts"))
 
@@ -342,6 +339,21 @@ else:
     except Exception:
         DATABASE_POOL_RECYCLE = 3600
 
+DATABASE_ENABLE_SQLITE_WAL = (
+    os.environ.get("DATABASE_ENABLE_SQLITE_WAL", "False").lower() == "true"
+)
+
+DATABASE_USER_ACTIVE_STATUS_UPDATE_INTERVAL = os.environ.get(
+    "DATABASE_USER_ACTIVE_STATUS_UPDATE_INTERVAL", None
+)
+if DATABASE_USER_ACTIVE_STATUS_UPDATE_INTERVAL is not None:
+    try:
+        DATABASE_USER_ACTIVE_STATUS_UPDATE_INTERVAL = float(
+            DATABASE_USER_ACTIVE_STATUS_UPDATE_INTERVAL
+        )
+    except Exception:
+        DATABASE_USER_ACTIVE_STATUS_UPDATE_INTERVAL = 0.0
+
 RESET_CONFIG_ON_START = (
     os.environ.get("RESET_CONFIG_ON_START", "False").lower() == "true"
 )
@@ -350,25 +362,16 @@ ENABLE_REALTIME_CHAT_SAVE = (
     os.environ.get("ENABLE_REALTIME_CHAT_SAVE", "False").lower() == "true"
 )
 
+ENABLE_QUERIES_CACHE = os.environ.get("ENABLE_QUERIES_CACHE", "False").lower() == "true"
+
 ####################################
 # REDIS
 ####################################
 
 REDIS_URL = os.environ.get("REDIS_URL", "")
-REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
-REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", "")
 REDIS_CLUSTER = os.environ.get("REDIS_CLUSTER", "False").lower() == "true"
 
 REDIS_KEY_PREFIX = os.environ.get("REDIS_KEY_PREFIX", "open-webui")
-
-# Backwards/compat variables for modules expecting discrete host/port/password
-REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
-try:
-    REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
-except ValueError:
-    REDIS_PORT = 6379
-REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", "")
 
 REDIS_SENTINEL_HOSTS = os.environ.get("REDIS_SENTINEL_HOSTS", "")
 REDIS_SENTINEL_PORT = os.environ.get("REDIS_SENTINEL_PORT", "26379")
@@ -401,6 +404,10 @@ except ValueError:
 ####################################
 
 WEBUI_AUTH = os.environ.get("WEBUI_AUTH", "True").lower() == "true"
+
+ENABLE_INITIAL_ADMIN_SIGNUP = (
+    os.environ.get("ENABLE_INITIAL_ADMIN_SIGNUP", "False").lower() == "true"
+)
 ENABLE_SIGNUP_PASSWORD_CONFIRMATION = (
     os.environ.get("ENABLE_SIGNUP_PASSWORD_CONFIRMATION", "False").lower() == "true"
 )
@@ -526,6 +533,19 @@ else:
         CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE = 1
 
 
+CHAT_RESPONSE_MAX_TOOL_CALL_RETRIES = os.environ.get(
+    "CHAT_RESPONSE_MAX_TOOL_CALL_RETRIES", "10"
+)
+
+if CHAT_RESPONSE_MAX_TOOL_CALL_RETRIES == "":
+    CHAT_RESPONSE_MAX_TOOL_CALL_RETRIES = 10
+else:
+    try:
+        CHAT_RESPONSE_MAX_TOOL_CALL_RETRIES = int(CHAT_RESPONSE_MAX_TOOL_CALL_RETRIES)
+    except Exception:
+        CHAT_RESPONSE_MAX_TOOL_CALL_RETRIES = 10
+
+
 ####################################
 # WEBSOCKET SUPPORT
 ####################################
@@ -600,6 +620,10 @@ else:
 AIOHTTP_CLIENT_SESSION_TOOL_SERVER_SSL = (
     os.environ.get("AIOHTTP_CLIENT_SESSION_TOOL_SERVER_SSL", "True").lower() == "true"
 )
+
+# Force IPv4 for OpenAI-related outbound requests
+# Default: True, can be disabled by setting OPENAI_FORCE_IPV4=false
+OPENAI_FORCE_IPV4 = os.environ.get("OPENAI_FORCE_IPV4", "True").lower() == "true"
 
 
 ####################################
@@ -694,6 +718,7 @@ AUDIT_EXCLUDED_PATHS = [path.lstrip("/") for path in AUDIT_EXCLUDED_PATHS]
 ####################################
 
 ENABLE_OTEL = os.environ.get("ENABLE_OTEL", "False").lower() == "true"
+ENABLE_OTEL_TRACES = os.environ.get("ENABLE_OTEL_TRACES", "False").lower() == "true"
 ENABLE_OTEL_METRICS = os.environ.get("ENABLE_OTEL_METRICS", "False").lower() == "true"
 ENABLE_OTEL_LOGS = os.environ.get("ENABLE_OTEL_LOGS", "False").lower() == "true"
 

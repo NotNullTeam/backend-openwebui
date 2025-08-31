@@ -510,7 +510,7 @@ OAUTH_EMAIL_CLAIM = PersistentConfig(
 OAUTH_GROUPS_CLAIM = PersistentConfig(
     "OAUTH_GROUPS_CLAIM",
     "oauth.oidc.group_claim",
-    os.environ.get("OAUTH_GROUP_CLAIM", "groups"),
+    os.environ.get("OAUTH_GROUPS_CLAIM", os.environ.get("OAUTH_GROUP_CLAIM", "groups")),
 )
 
 ENABLE_OAUTH_ROLE_MANAGEMENT = PersistentConfig(
@@ -731,58 +731,51 @@ load_oauth_providers()
 
 STATIC_DIR = Path(os.getenv("STATIC_DIR", OPEN_WEBUI_DIR / "static")).resolve()
 
-# 仅当存在前端构建产物时，才清理并同步到 STATIC_DIR，避免空构建导致误删静态资源
-_FRONTEND_STATIC_DIR = FRONTEND_BUILD_DIR / "static"
-_has_frontend_static = False
 try:
-    if _FRONTEND_STATIC_DIR.exists():
-        for _ in _FRONTEND_STATIC_DIR.rglob("*"):
-            _has_frontend_static = True
-            break
-except Exception:
-    _has_frontend_static = False
+    if STATIC_DIR.exists():
+        for item in STATIC_DIR.iterdir():
+            if item.is_file() or item.is_symlink():
+                try:
+                    item.unlink()
+                except Exception as e:
+                    pass
+except Exception as e:
+    pass
 
-if _has_frontend_static:
+for file_path in (FRONTEND_BUILD_DIR / "static").glob("**/*"):
+    if file_path.is_file():
+        target_path = STATIC_DIR / file_path.relative_to(
+            (FRONTEND_BUILD_DIR / "static")
+        )
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copyfile(file_path, target_path)
+        except Exception as e:
+            logging.error(f"An error occurred: {e}")
+
+frontend_favicon = FRONTEND_BUILD_DIR / "static" / "favicon.png"
+
+if frontend_favicon.exists():
     try:
-        if STATIC_DIR.exists():
-            for item in STATIC_DIR.iterdir():
-                if item.is_file() or item.is_symlink():
-                    try:
-                        item.unlink()
-                    except Exception:
-                        pass
-    except Exception:
-        pass
+        shutil.copyfile(frontend_favicon, STATIC_DIR / "favicon.png")
+    except Exception as e:
+        logging.error(f"An error occurred: {e}")
 
-    for file_path in _FRONTEND_STATIC_DIR.glob("**/*"):
-        if file_path.is_file():
-            target_path = STATIC_DIR / file_path.relative_to(_FRONTEND_STATIC_DIR)
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                shutil.copyfile(file_path, target_path)
-            except Exception as e:
-                logging.error(f"An error occurred: {e}")
+frontend_splash = FRONTEND_BUILD_DIR / "static" / "splash.png"
 
-    frontend_favicon = _FRONTEND_STATIC_DIR / "favicon.png"
-    if frontend_favicon.exists():
-        try:
-            shutil.copyfile(frontend_favicon, STATIC_DIR / "favicon.png")
-        except Exception as e:
-            logging.error(f"An error occurred: {e}")
+if frontend_splash.exists():
+    try:
+        shutil.copyfile(frontend_splash, STATIC_DIR / "splash.png")
+    except Exception as e:
+        logging.error(f"An error occurred: {e}")
 
-    frontend_splash = _FRONTEND_STATIC_DIR / "splash.png"
-    if frontend_splash.exists():
-        try:
-            shutil.copyfile(frontend_splash, STATIC_DIR / "splash.png")
-        except Exception as e:
-            logging.error(f"An error occurred: {e}")
+frontend_loader = FRONTEND_BUILD_DIR / "static" / "loader.js"
 
-    frontend_loader = _FRONTEND_STATIC_DIR / "loader.js"
-    if frontend_loader.exists():
-        try:
-            shutil.copyfile(frontend_loader, STATIC_DIR / "loader.js")
-        except Exception as e:
-            logging.error(f"An error occurred: {e}")
+if frontend_loader.exists():
+    try:
+        shutil.copyfile(frontend_loader, STATIC_DIR / "loader.js")
+    except Exception as e:
+        logging.error(f"An error occurred: {e}")
 
 
 ####################################
@@ -960,6 +953,9 @@ GEMINI_API_BASE_URL = os.environ.get("GEMINI_API_BASE_URL", "")
 
 if OPENAI_API_BASE_URL == "":
     OPENAI_API_BASE_URL = "https://api.openai.com/v1"
+else:
+    if OPENAI_API_BASE_URL.endswith("/"):
+        OPENAI_API_BASE_URL = OPENAI_API_BASE_URL[:-1]
 
 OPENAI_API_KEYS = os.environ.get("OPENAI_API_KEYS", "")
 OPENAI_API_KEYS = OPENAI_API_KEYS if OPENAI_API_KEYS != "" else OPENAI_API_KEY
@@ -1212,6 +1208,23 @@ USER_PERMISSIONS_CHAT_DELETE = (
     os.environ.get("USER_PERMISSIONS_CHAT_DELETE", "True").lower() == "true"
 )
 
+USER_PERMISSIONS_CHAT_DELETE_MESSAGE = (
+    os.environ.get("USER_PERMISSIONS_CHAT_DELETE_MESSAGE", "True").lower() == "true"
+)
+
+USER_PERMISSIONS_CHAT_CONTINUE_RESPONSE = (
+    os.environ.get("USER_PERMISSIONS_CHAT_CONTINUE_RESPONSE", "True").lower() == "true"
+)
+
+USER_PERMISSIONS_CHAT_REGENERATE_RESPONSE = (
+    os.environ.get("USER_PERMISSIONS_CHAT_REGENERATE_RESPONSE", "True").lower()
+    == "true"
+)
+
+USER_PERMISSIONS_CHAT_RATE_RESPONSE = (
+    os.environ.get("USER_PERMISSIONS_CHAT_RATE_RESPONSE", "True").lower() == "true"
+)
+
 USER_PERMISSIONS_CHAT_EDIT = (
     os.environ.get("USER_PERMISSIONS_CHAT_EDIT", "True").lower() == "true"
 )
@@ -1294,6 +1307,10 @@ DEFAULT_USER_PERMISSIONS = {
         "params": USER_PERMISSIONS_CHAT_PARAMS,
         "file_upload": USER_PERMISSIONS_CHAT_FILE_UPLOAD,
         "delete": USER_PERMISSIONS_CHAT_DELETE,
+        "delete_message": USER_PERMISSIONS_CHAT_DELETE_MESSAGE,
+        "continue_response": USER_PERMISSIONS_CHAT_CONTINUE_RESPONSE,
+        "regenerate_response": USER_PERMISSIONS_CHAT_REGENERATE_RESPONSE,
+        "rate_response": USER_PERMISSIONS_CHAT_RATE_RESPONSE,
         "edit": USER_PERMISSIONS_CHAT_EDIT,
         "share": USER_PERMISSIONS_CHAT_SHARE,
         "export": USER_PERMISSIONS_CHAT_EXPORT,
@@ -1360,6 +1377,14 @@ ENABLE_ADMIN_EXPORT = os.environ.get("ENABLE_ADMIN_EXPORT", "True").lower() == "
 
 ENABLE_ADMIN_WORKSPACE_CONTENT_ACCESS = (
     os.environ.get("ENABLE_ADMIN_WORKSPACE_CONTENT_ACCESS", "True").lower() == "true"
+)
+
+BYPASS_ADMIN_ACCESS_CONTROL = (
+    os.environ.get(
+        "BYPASS_ADMIN_ACCESS_CONTROL",
+        os.environ.get("ENABLE_ADMIN_WORKSPACE_CONTENT_ACCESS", "True"),
+    ).lower()
+    == "true"
 )
 
 ENABLE_ADMIN_CHAT_ACCESS = (
@@ -1864,6 +1889,11 @@ CODE_INTERPRETER_JUPYTER_TIMEOUT = PersistentConfig(
     ),
 )
 
+CODE_INTERPRETER_BLOCKED_MODULES = [
+    library.strip()
+    for library in os.environ.get("CODE_INTERPRETER_BLOCKED_MODULES", "").split(",")
+    if library.strip()
+]
 
 DEFAULT_CODE_INTERPRETER_PROMPT = """
 #### Tools Available
@@ -2053,10 +2083,6 @@ log.info(f"VECTOR_DB: {VECTOR_DB}")
 S3_VECTOR_BUCKET_NAME = os.environ.get("S3_VECTOR_BUCKET_NAME", None)
 S3_VECTOR_REGION = os.environ.get("S3_VECTOR_REGION", None)
 
-# Weaviate (optional)
-WEAVIATE_URL = os.environ.get("WEAVIATE_URL", "http://localhost:8080")
-WEAVIATE_COLLECTION_PREFIX = os.environ.get("WEAVIATE_COLLECTION_PREFIX", "open_webui")
-
 ####################################
 # Information Retrieval (RAG)
 ####################################
@@ -2213,28 +2239,6 @@ DOCLING_OCR_LANG = PersistentConfig(
     "DOCLING_OCR_LANG",
     "rag.docling_ocr_lang",
     os.getenv("DOCLING_OCR_LANG", "eng,fra,deu,spa"),
-)
-
-# Alibaba IDP (DocMind) options
-ALIBABA_IDP_ENABLE_LLM = PersistentConfig(
-    "ALIBABA_IDP_ENABLE_LLM",
-    "rag.alibaba_idp_enable_llm",
-    os.getenv("ALIBABA_IDP_ENABLE_LLM", "true").lower() == "true",
-)
-ALIBABA_IDP_ENABLE_FORMULA = PersistentConfig(
-    "ALIBABA_IDP_ENABLE_FORMULA",
-    "rag.alibaba_idp_enable_formula",
-    os.getenv("ALIBABA_IDP_ENABLE_FORMULA", "true").lower() == "true",
-)
-ALIBABA_IDP_MAX_CHUNK_SIZE = PersistentConfig(
-    "ALIBABA_IDP_MAX_CHUNK_SIZE",
-    "rag.alibaba_idp_max_chunk_size",
-    int(os.getenv("ALIBABA_IDP_MAX_CHUNK_SIZE", "1000")),
-)
-ALIBABA_IDP_CHUNK_OVERLAP = PersistentConfig(
-    "ALIBABA_IDP_CHUNK_OVERLAP",
-    "rag.alibaba_idp_chunk_overlap",
-    int(os.getenv("ALIBABA_IDP_CHUNK_OVERLAP", "100")),
 )
 
 DOCLING_DO_PICTURE_DESCRIPTION = PersistentConfig(
@@ -2643,6 +2647,14 @@ WEB_LOADER_ENGINE = PersistentConfig(
     "rag.web.loader.engine",
     os.environ.get("WEB_LOADER_ENGINE", ""),
 )
+
+
+WEB_LOADER_CONCURRENT_REQUESTS = PersistentConfig(
+    "WEB_LOADER_CONCURRENT_REQUESTS",
+    "rag.web.loader.concurrent_requests",
+    int(os.getenv("WEB_LOADER_CONCURRENT_REQUESTS", "10")),
+)
+
 
 ENABLE_WEB_LOADER_SSL_VERIFICATION = PersistentConfig(
     "ENABLE_WEB_LOADER_SSL_VERIFICATION",
